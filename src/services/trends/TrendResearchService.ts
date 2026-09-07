@@ -1,64 +1,100 @@
 import { getAIProvider, extractJson } from "@/services/openai/OpenAIService";
-import { researchCandidateSchema, type ResearchCandidate } from "@/services/types";
+import { trendResearchSchema, type TrendResearch, productPickSchema, type ProductPick } from "@/services/types";
 import {
   trendResearchSystemPrompt,
-  trendCandidatePrompt,
+  trendResearchUserPrompt,
+  productPickSystemPrompt,
+  productPickUserPrompt,
   type PreviousProductContext,
 } from "@/config/prompts";
 import type { Settings } from "@/config/defaults";
+import type { AeSearchItem } from "@/services/aliexpress/aeSearch";
 import { logger } from "@/lib/logger";
 
-export interface ResearchAttemptResult {
-  candidate: ResearchCandidate | null;
+export interface TrendAttempt {
+  research: TrendResearch | null;
   parseError: string | null;
   webSources: { url: string; title?: string }[];
   rawText: string;
 }
 
 export const TrendResearchService = {
-  /**
-   * Ask the AI for ONE emerging trend + matching AliExpress product.
-   * TREND FIRST, PRODUCT SECOND is enforced by the prompt; here we just run the
-   * call and validate the structure.
-   */
-  async researchOne(params: {
+  /** AI: discover ONE emerging trend + AliExpress search phrases (no product). */
+  async researchTrend(params: {
     settings: Settings;
     targetDate: string;
     previous: PreviousProductContext[];
-    attemptsRemaining: number;
-    alreadyAcceptedCategories: string[];
     avoidTrendTitles: string[];
+    alreadyAcceptedCategories: string[];
     runId?: string;
-  }): Promise<ResearchAttemptResult> {
+  }): Promise<TrendAttempt> {
     const ai = await getAIProvider();
-    const system = trendResearchSystemPrompt(params.settings);
-    const user = trendCandidatePrompt(params);
-
     const res = await ai.generate({
-      system,
-      user,
+      system: trendResearchSystemPrompt(params.settings),
+      user: trendResearchUserPrompt({
+        targetDate: params.targetDate,
+        previous: params.previous,
+        avoidTrendTitles: params.avoidTrendTitles,
+        alreadyAcceptedCategories: params.alreadyAcceptedCategories,
+        enforceDistinctCategories: params.settings.diversityRules.enforceDistinctCategories,
+      }),
       webSearch: true,
-      operation: "trend.research.candidate",
+      operation: "trend.research.trend",
       runId: params.runId,
-      maxOutputTokens: 5000,
+      maxOutputTokens: 2500,
     });
 
     try {
-      const json = extractJson(res.text);
-      const candidate = researchCandidateSchema.parse(json);
-      return {
-        candidate,
-        parseError: null,
-        webSources: res.webSources,
-        rawText: res.text,
-      };
+      const research = trendResearchSchema.parse(extractJson(res.text));
+      return { research, parseError: null, webSources: res.webSources, rawText: res.text };
     } catch (err) {
-      logger.warn({ err, sample: res.text.slice(0, 400) }, "research candidate failed validation");
+      logger.warn({ err, sample: res.text.slice(0, 300) }, "trend research failed validation");
       return {
-        candidate: null,
+        research: null,
         parseError: err instanceof Error ? err.message : String(err),
         webSources: res.webSources,
         rawText: res.text,
+      };
+    }
+  },
+
+  /** AI: pick the best REAL product for the trend from fetched candidates. */
+  async pickProduct(params: {
+    trend: { title: string; description: string; category: string };
+    candidates: AeSearchItem[];
+    runId?: string;
+  }): Promise<ProductPick> {
+    if (params.candidates.length === 0) {
+      return { chosenProductId: null, relevance: 0, rejectionReason: "no AliExpress candidates", reasoning: "" };
+    }
+    const ai = await getAIProvider();
+    try {
+      const res = await ai.generate({
+        system: productPickSystemPrompt(),
+        user: productPickUserPrompt(params.trend, params.candidates),
+        light: true,
+        operation: "trend.pick.product",
+        runId: params.runId,
+        maxOutputTokens: 500,
+      });
+      const pick = productPickSchema.parse(extractJson(res.text));
+      // guard: chosen id must be one of the candidates
+      if (pick.chosenProductId && !params.candidates.some((c) => c.productId === pick.chosenProductId)) {
+        return {
+          chosenProductId: params.candidates[0].productId,
+          relevance: Math.min(pick.relevance, 60),
+          rejectionReason: null,
+          reasoning: `AI returned an unknown id; fell back to top-ranked candidate. ${pick.reasoning}`,
+        };
+      }
+      return pick;
+    } catch (err) {
+      logger.warn({ err }, "product pick failed, using top-ranked candidate");
+      return {
+        chosenProductId: params.candidates[0].productId,
+        relevance: 55,
+        rejectionReason: null,
+        reasoning: "Fallback: picker unavailable, used highest-ranked real listing.",
       };
     }
   },

@@ -98,7 +98,8 @@ async function loadDiversityHistory(
 }
 
 async function hebrewCopyFor(
-  candidate: any,
+  research: any,
+  product: { aeTitle: string },
   scores: any,
   runId: string,
 ): Promise<{ explanationHe: string; overallReasoningHe: string }> {
@@ -106,7 +107,7 @@ async function hebrewCopyFor(
   try {
     const res = await ai.generate({
       system: hebrewExplanationPrompt(),
-      user: JSON.stringify({ trend: candidate.trend, product: { title: candidate.product?.aeTitle }, scores, socialSignals: candidate.socialSignals }),
+      user: JSON.stringify({ trend: research.trend, product: { title: product.aeTitle }, scores, socialSignals: research.socialSignals }),
       light: true,
       operation: "copy.hebrew",
       runId,
@@ -227,42 +228,40 @@ async function runPipeline(
         candidateOrder++;
         emit("research", `attempt ${attempt}/${settings.maxCandidates}`);
 
-        const research = await TrendResearchService.researchOne({
+        // ---- 1. AI: discover the emerging trend + AliExpress search phrases
+        const attemptRes = await TrendResearchService.researchTrend({
           settings,
           targetDate,
           previous,
-          attemptsRemaining: settings.maxCandidates - attempt,
-          alreadyAcceptedCategories: acceptedDiversity.map((d) =>
-            normalizeCategory(d.category),
-          ),
           avoidTrendTitles,
+          alreadyAcceptedCategories: acceptedDiversity.map((d) => normalizeCategory(d.category)),
           runId: run.id,
         });
 
-        if (research.parseError || !research.candidate) {
+        if (attemptRes.parseError || !attemptRes.research) {
           await prisma.generationCandidate.create({
             data: {
               runId: run.id,
               order: candidateOrder,
               trendTitle: "(unparseable AI response)",
-              trendDescription: research.parseError ?? "no candidate returned",
+              trendDescription: attemptRes.parseError ?? "no research returned",
               status: "REJECTED_OTHER",
-              rejectionReason: research.parseError ?? "AI returned no candidate",
-              rawResearch: { rawText: research.rawText.slice(0, 4000) },
+              rejectionReason: attemptRes.parseError ?? "AI returned nothing usable",
+              rawResearch: { rawText: attemptRes.rawText.slice(0, 4000) },
             },
           });
-          errorLog.push({ step: "research", message: research.parseError ?? "no candidate", at: new Date().toISOString() });
+          errorLog.push({ step: "research", message: attemptRes.parseError ?? "no research", at: new Date().toISOString() });
           continue;
         }
 
-        const c = research.candidate;
-        avoidTrendTitles.push(c.trend.title);
-        searchedTopics.push(...(c.trend.keywordsSearched ?? []), c.trend.title);
+        const r = attemptRes.research;
+        const category = normalizeCategory(r.trend.category);
+        avoidTrendTitles.push(r.trend.title);
+        searchedTopics.push(...r.searchQueries, r.trend.title);
 
-        // persist web sources at run level
         await persistSources(run.id, null, [
-          ...c.sources,
-          ...research.webSources.map((s) => ({
+          ...r.sources,
+          ...attemptRes.webSources.map((s) => ({
             url: s.url,
             title: s.title ?? null,
             sourceType: "web" as const,
@@ -271,142 +270,174 @@ async function runPipeline(
           })),
         ]);
 
-        if (!c.productFound || !c.product) {
-          await prisma.generationCandidate.create({
-            data: {
-              runId: run.id,
-              order: candidateOrder,
-              trendTitle: c.trend.title,
-              trendDescription: c.trend.description,
-              category: normalizeCategory(c.trend.category),
-              status: "REJECTED_NO_PRODUCT",
-              rejectionReason: c.rejectionReason ?? "AI reported no suitable AliExpress product",
-              socialSignals: c.socialSignals as any,
-              rawResearch: c as any,
-            },
-          });
-          emit("reject", `no AliExpress product for "${c.trend.title}"`);
-          continue;
-        }
-
-        // ---- AliExpress normalise + corroborate ---------------------------
-        emit("aliexpress", `normalising product for "${c.trend.title}"`);
-        const np = await AliExpressResearchService.normalize(c, {
-          corroborate: true,
-          runId: run.id,
-        });
-
-        const baseCandidateData = {
+        const baseCandidateData: Record<string, unknown> = {
           runId: run.id,
           order: candidateOrder,
-          trendTitle: c.trend.title,
-          trendDescription: c.trend.description,
-          category: normalizeCategory(c.trend.category),
-          aeUrl: np?.aeUrl ?? c.product.aeUrl,
-          aeProductId: np?.aeProductId ?? c.product.aeProductId ?? null,
-          aeTitle: np?.aeTitle ?? c.product.aeTitle,
-          aeImages: (np?.aeImages ?? c.product.aeImages) as any,
-          aeRating: np?.aeRating ?? c.product.aeRating ?? null,
-          aeOrders: np?.aeOrders ?? c.product.aeOrders ?? null,
-          priceOriginal: np?.priceOriginal ?? c.product.priceOriginal ?? null,
-          currencyOriginal: np?.currencyOriginal ?? c.product.currencyOriginal ?? null,
-          socialSignals: c.socialSignals as any,
-          rawResearch: c as any,
+          trendTitle: r.trend.title,
+          trendDescription: r.trend.description,
+          category,
+          socialSignals: r.socialSignals as any,
+          rawResearch: { research: r, searchQueries: r.searchQueries } as any,
         };
 
-        if (!np) {
+        // ---- 2. REAL AliExpress search (code, not the LLM)
+        emit("aliexpress", `searching AliExpress: ${r.searchQueries.slice(0, 3).join(" / ")}`);
+        const excludeIds = new Set<string>([
+          ...(history.map((h) => h.aeProductId).filter(Boolean) as string[]),
+          ...(acceptedDiversity.map((d) => d.aeProductId).filter(Boolean) as string[]),
+        ]);
+        const { searches, candidates } = await AliExpressResearchService.gatherCandidates(
+          r.searchQueries,
+          { excludeProductIds: excludeIds },
+        );
+        (baseCandidateData.rawResearch as any).aeSearches = searches.map((s) => ({
+          query: s.query,
+          count: s.results.length,
+        }));
+
+        if (candidates.length === 0) {
           await prisma.generationCandidate.create({
-            data: { ...baseCandidateData, status: "REJECTED_NO_PRODUCT", rejectionReason: "product URL is not a valid AliExpress listing" },
+            data: {
+              ...(baseCandidateData as any),
+              status: "REJECTED_NO_PRODUCT",
+              rejectionReason: `AliExpress search returned no usable products for: ${r.searchQueries.join(", ")}`,
+            },
           });
-          emit("reject", "invalid AliExpress URL");
+          emit("reject", `no AliExpress products for "${r.trend.title}"`);
           continue;
         }
 
-        const quality = AliExpressResearchService.qualityCheck(np);
+        // ---- 3. AI: pick the best REAL product for the trend
+        const pick = await TrendResearchService.pickProduct({
+          trend: r.trend,
+          candidates,
+          runId: run.id,
+        });
+        const chosen = pick.chosenProductId
+          ? candidates.find((c) => c.productId === pick.chosenProductId)
+          : null;
+        if (!chosen) {
+          await prisma.generationCandidate.create({
+            data: {
+              ...(baseCandidateData as any),
+              status: "REJECTED_NO_PRODUCT",
+              rejectionReason: pick.rejectionReason ?? "no candidate matched the trend well enough",
+            },
+          });
+          emit("reject", `no matching product for "${r.trend.title}"`);
+          continue;
+        }
+
+        const rp = AliExpressResearchService.toRealProduct(chosen);
+        Object.assign(baseCandidateData, {
+          aeUrl: rp.aeUrl,
+          aeProductId: rp.aeProductId,
+          aeTitle: rp.aeTitle,
+          aeImages: rp.aeImages as any,
+          aeRating: rp.aeRating,
+          aeOrders: rp.aeOrders,
+          priceOriginal: rp.priceOriginal,
+          currencyOriginal: rp.currencyOriginal,
+        });
+
+        const quality = AliExpressResearchService.qualityCheck(rp);
         if (!quality.ok) {
           await prisma.generationCandidate.create({
-            data: { ...baseCandidateData, status: "REJECTED_DATA_QUALITY", rejectionReason: quality.reason },
+            data: { ...(baseCandidateData as any), status: "REJECTED_DATA_QUALITY", rejectionReason: quality.reason },
           });
           emit("reject", `data quality: ${quality.reason}`);
           continue;
         }
+        if (pick.relevance < 45) {
+          await prisma.generationCandidate.create({
+            data: {
+              ...(baseCandidateData as any),
+              status: "REJECTED_OTHER",
+              rejectionReason: `product relevance ${pick.relevance} too low — ${pick.reasoning}`,
+            },
+          });
+          emit("reject", `low relevance (${pick.relevance})`);
+          continue;
+        }
 
-        // ---- scoring -----------------------------------------------------
-        emit("scoring", `scoring "${c.trend.title}"`);
-        const scored = await ProductScoringService.score(c, settings.scoringWeights, run.id);
+        // ---- 4. scoring
+        emit("scoring", `scoring "${r.trend.title}"`);
+        const scored = await ProductScoringService.score(
+          { trend: r.trend, product: rp, socialSignals: r.socialSignals, selfAssessment: r.selfAssessment },
+          settings.scoringWeights,
+          run.id,
+        );
 
         if (scored.saturationScore > settings.maxSaturationScore) {
           await prisma.generationCandidate.create({
-            data: { ...baseCandidateData, scores: scored as any, status: "REJECTED_SATURATED", rejectionReason: `saturation ${scored.saturationScore} > max ${settings.maxSaturationScore}` },
+            data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_SATURATED", rejectionReason: `saturation ${scored.saturationScore} > max ${settings.maxSaturationScore}` },
           });
           emit("reject", `saturated (${scored.saturationScore})`);
           continue;
         }
         if (scored.overallScore < settings.minOverallScore) {
           await prisma.generationCandidate.create({
-            data: { ...baseCandidateData, scores: scored as any, status: "REJECTED_LOW_SCORE", rejectionReason: `overall ${scored.overallScore} < min ${settings.minOverallScore}` },
+            data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_LOW_SCORE", rejectionReason: `overall ${scored.overallScore} < min ${settings.minOverallScore}` },
           });
           emit("reject", `low score (${scored.overallScore})`);
           continue;
         }
 
-        // ---- diversity + duplicate ------------------------------------
+        // ---- 5. diversity + duplicate
         const divItem: DiversityItem = {
-          title: np.aeTitle,
-          trendTitle: c.trend.title,
-          trendDescription: c.trend.description,
-          category: normalizeCategory(c.trend.category),
-          aeProductId: np.aeProductId,
+          title: rp.aeTitle,
+          trendTitle: r.trend.title,
+          trendDescription: r.trend.description,
+          category,
+          aeProductId: rp.aeProductId,
         };
-        const div = DiversityService.evaluate(
-          divItem,
-          acceptedDiversity,
-          history,
-          settings.diversityRules,
-        );
+        const div = DiversityService.evaluate(divItem, acceptedDiversity, history, settings.diversityRules);
         if (!div.ok) {
           await prisma.generationCandidate.create({
-            data: { ...baseCandidateData, scores: scored as any, status: div.status, rejectionReason: div.reason },
+            data: { ...(baseCandidateData as any), scores: scored as any, status: div.status, rejectionReason: div.reason },
           });
           emit("reject", div.reason);
           continue;
         }
 
-        // ---- ACCEPT: build the Product ------------------------------
-        emit("accept", `"${c.trend.title}" accepted (${acceptedProductIds.length + 1}/3)`);
+        // ---- 6. ACCEPT
+        emit("accept", `"${r.trend.title}" -> ${rp.aeTitle} (${acceptedProductIds.length + 1}/3)`);
         const fx = await CurrencyService.toDisplay({
-          priceOriginal: np.priceOriginal,
-          currencyOriginal: np.currencyOriginal,
-          priceShipping: np.priceShipping,
-          shippingVerified: np.shippingVerified,
+          priceOriginal: rp.priceOriginal,
+          currencyOriginal: rp.currencyOriginal,
+          priceShipping: null,
+          shippingVerified: false,
         });
-        const copy = await hebrewCopyFor(c, scored, run.id);
-        const category = normalizeCategory(c.trend.category);
+        const copy = await hebrewCopyFor(r, rp, scored, run.id);
 
         const product = await prisma.product.create({
           data: {
-            trendTitle: c.trend.title,
-            trendDescription: c.trend.description,
+            trendTitle: r.trend.title,
+            trendDescription: r.trend.description,
             category,
-            slug: makeSlug(c.trend.title, `${targetDate}-${run.id}-${candidateOrder}`),
-            aeTitle: np.aeTitle,
-            aeDescription: np.aeDescription,
-            aeUrl: np.aeUrl,
-            aeProductId: np.aeProductId,
-            aeStoreName: np.aeStoreName,
-            aeImages: np.aeImages as any,
-            aeRating: np.aeRating,
-            aeOrders: np.aeOrders,
-            aeVariants: (np.aeVariants ?? undefined) as any,
-            priceOriginal: np.priceOriginal,
-            currencyOriginal: np.currencyOriginal,
-            priceShipping: np.priceShipping,
-            shippingVerified: np.shippingVerified,
+            slug: makeSlug(r.trend.title, `${targetDate}-${run.id}-${candidateOrder}`),
+            aeTitle: rp.aeTitle,
+            aeDescription: null,
+            aeUrl: rp.aeUrl,
+            aeProductId: rp.aeProductId,
+            aeStoreName: rp.aeStoreName,
+            aeImages: rp.aeImages as any,
+            aeRating: rp.aeRating,
+            aeOrders: rp.aeOrders,
+            aeVariants: undefined,
+            priceOriginal: rp.priceOriginal,
+            currencyOriginal: rp.currencyOriginal,
+            priceShipping: null,
+            shippingVerified: false,
             priceIls: fx.priceIls,
             priceIlsTotal: fx.priceIlsTotal,
             fxRateUsed: fx.fxRateUsed,
             fxAsOf: fx.fxAsOf,
-            dataConfidence: { ...np.dataConfidence, corroboration: np.corroboration } as any,
+            dataConfidence: {
+              ...rp.dataConfidence,
+              pickRelevance: pick.relevance,
+              pickReasoning: pick.reasoning,
+            } as any,
             viralPotentialScore: scored.viralPotentialScore,
             affiliatePotentialScore: scored.affiliatePotentialScore,
             noveltyScore: scored.noveltyScore,
@@ -418,30 +449,24 @@ async function runPipeline(
             origin: "AI",
             trendReport: {
               create: {
-                tiktokLevel: c.socialSignals.tiktok.level,
-                tiktokReasoning: c.socialSignals.tiktok.reasoning,
-                instagramLevel: c.socialSignals.instagram.level,
-                instagramReasoning: c.socialSignals.instagram.reasoning,
-                youtubeLevel: c.socialSignals.youtube.level,
-                youtubeReasoning: c.socialSignals.youtube.reasoning,
-                googleTrendsLevel: c.socialSignals.googleTrends.level,
-                googleTrendsReasoning: c.socialSignals.googleTrends.reasoning,
-                verifiedMetrics: (c.socialSignals.verifiedMetrics ?? undefined) as any,
+                tiktokLevel: r.socialSignals.tiktok.level,
+                tiktokReasoning: r.socialSignals.tiktok.reasoning,
+                instagramLevel: r.socialSignals.instagram.level,
+                instagramReasoning: r.socialSignals.instagram.reasoning,
+                youtubeLevel: r.socialSignals.youtube.level,
+                youtubeReasoning: r.socialSignals.youtube.reasoning,
+                googleTrendsLevel: r.socialSignals.googleTrends.level,
+                googleTrendsReasoning: r.socialSignals.googleTrends.reasoning,
+                verifiedMetrics: (r.socialSignals.verifiedMetrics ?? undefined) as any,
                 overallReasoningHe: copy.overallReasoningHe,
               },
             },
           },
         });
 
-        await persistSources(run.id, product.id, c.sources);
-
+        await persistSources(run.id, product.id, r.sources);
         await prisma.generationCandidate.create({
-          data: {
-            ...baseCandidateData,
-            scores: scored as any,
-            status: "ACCEPTED",
-            productId: product.id,
-          },
+          data: { ...(baseCandidateData as any), scores: scored as any, status: "ACCEPTED", productId: product.id },
         });
 
         acceptedProductIds.push(product.id);

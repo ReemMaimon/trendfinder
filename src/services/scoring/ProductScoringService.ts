@@ -1,6 +1,7 @@
 import type { ScoringWeights } from "@/config/defaults";
-import type { ResearchCandidate, ScoreResult } from "@/services/types";
+import type { ScoreResult, TrendResearch } from "@/services/types";
 import { scoreSchema } from "@/services/types";
+import type { RealProduct } from "@/services/aliexpress/AliExpressResearchService";
 import { scoringSystemPrompt } from "@/config/prompts";
 import { getAIProvider, extractJson } from "@/services/openai/OpenAIService";
 import { logger } from "@/lib/logger";
@@ -19,10 +20,7 @@ function clamp0100(n: number): number {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-/**
- * Overall = weighted positives − saturation penalty, renormalised to 0..100.
- * Weights are configurable from Admin Settings.
- */
+/** Overall = weighted positives − saturation penalty, renormalised to 0..100. */
 export function computeOverall(
   parts: {
     viralPotentialScore: number;
@@ -33,41 +31,40 @@ export function computeOverall(
   },
   w: ScoringWeights,
 ): number {
-  const positiveWeight =
-    w.viralPotential + w.affiliatePotential + w.trendMomentum + w.novelty;
+  const positiveWeight = w.viralPotential + w.affiliatePotential + w.trendMomentum + w.novelty;
   const positive =
     parts.viralPotentialScore * w.viralPotential +
     parts.affiliatePotentialScore * w.affiliatePotential +
     parts.trendMomentumScore * w.trendMomentum +
     parts.noveltyScore * w.novelty;
   const penalty = parts.saturationScore * w.saturationPenalty;
-  // Scale so a "perfect" product (100s, 0 saturation) => 100.
-  const raw = (positive - penalty) / positiveWeight;
-  return clamp0100(raw);
+  return clamp0100((positive - penalty) / positiveWeight);
 }
 
 export const ProductScoringService = {
   async score(
-    candidate: ResearchCandidate,
+    input: {
+      trend: TrendResearch["trend"];
+      product: RealProduct;
+      socialSignals: TrendResearch["socialSignals"];
+      selfAssessment: TrendResearch["selfAssessment"];
+    },
     weights: ScoringWeights,
     runId?: string,
   ): Promise<ScoredCandidate> {
     const ai = await getAIProvider();
-
     const user = JSON.stringify({
-      trend: candidate.trend,
-      product: candidate.product
-        ? {
-            title: candidate.product.aeTitle,
-            rating: candidate.product.aeRating,
-            orders: candidate.product.aeOrders,
-            price: candidate.product.priceOriginal,
-            currency: candidate.product.currencyOriginal,
-            store: candidate.product.aeStoreName,
-          }
-        : null,
-      socialSignals: candidate.socialSignals,
-      selfAssessment: candidate.selfAssessment,
+      trend: input.trend,
+      product: {
+        title: input.product.aeTitle,
+        rating: input.product.aeRating,
+        orders: input.product.aeOrders,
+        price: input.product.priceOriginal,
+        currency: input.product.currencyOriginal,
+        store: input.product.aeStoreName,
+      },
+      socialSignals: input.socialSignals,
+      selfAssessment: input.selfAssessment,
     });
 
     let scores: ScoreResult;
@@ -76,7 +73,6 @@ export const ProductScoringService = {
         system: scoringSystemPrompt(),
         user,
         light: true,
-        webSearch: false,
         operation: "scoring.candidate",
         runId,
         maxOutputTokens: 600,
@@ -84,12 +80,12 @@ export const ProductScoringService = {
       scores = scoreSchema.parse(extractJson(res.text));
     } catch (err) {
       logger.warn({ err }, "scoring call failed, falling back to self-assessment");
-      const sa = candidate.selfAssessment ?? {};
+      const sa = input.selfAssessment ?? {};
       scores = scoreSchema.parse({
-        viralPotentialScore: sa.viralPotential ?? 50,
-        affiliatePotentialScore: sa.affiliatePotential ?? 50,
-        noveltyScore: sa.novelty ?? 50,
-        trendMomentumScore: sa.trendMomentum ?? 50,
+        viralPotentialScore: sa.viralPotential ?? 55,
+        affiliatePotentialScore: sa.affiliatePotential ?? 55,
+        noveltyScore: sa.novelty ?? 55,
+        trendMomentumScore: sa.trendMomentum ?? 55,
         saturationScore: sa.saturation ?? 50,
         reasoning: "Fallback: AI self-assessment (scoring model unavailable).",
       });
@@ -102,11 +98,6 @@ export const ProductScoringService = {
       trendMomentumScore: clamp0100(scores.trendMomentumScore),
       saturationScore: clamp0100(scores.saturationScore),
     };
-
-    return {
-      ...parts,
-      overallScore: computeOverall(parts, weights),
-      reasoning: scores.reasoning ?? "",
-    };
+    return { ...parts, overallScore: computeOverall(parts, weights), reasoning: scores.reasoning ?? "" };
   },
 };

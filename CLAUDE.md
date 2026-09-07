@@ -19,12 +19,16 @@ admin panel.
 - `npm run typecheck`, `npm run build`
 
 ## Architecture rules (don't break these)
-1. **TREND FIRST, PRODUCT SECOND.** Discovery starts from a trend; AliExpress is
-   searched only to confirm a matching product exists.
-2. **No AliExpress private API.** `AliExpressResearchService` works off web
-   research + light Open Graph corroboration only.
-3. **No hallucinated facts.** Price/rating/orders/images/URLs are `null` when
-   unverifiable. The AI may only infer viral/novelty/saturation.
+1. **TREND FIRST, PRODUCT SECOND.** The AI discovers the trend + AliExpress
+   *search phrases*. It NEVER returns product URLs/images/prices (it hallucinates
+   fake item ids that 404). Real products come from `aeSearch.ts`, which fetches
+   the real `aliexpress.com/w/wholesale-<kw>.html` results page and parses the
+   embedded `itemList` JSON. Then `TrendResearchService.pickProduct` has the AI
+   choose the best *real* candidate.
+2. **No AliExpress private/affiliate API for discovery.** `aeSearch.ts` scrapes
+   the public search page. `AI_PROVIDER=mock` → synthetic search results (offline).
+3. **No hallucinated facts.** Every stored product field is real data from the
+   listing JSON. The AI may only infer viral/novelty/saturation scores.
 4. **All affiliate logic lives in `AffiliateService`.** TEST → plain URL,
    PRODUCTION → affiliate link, PRODUCTION+misconfigured → throw (never a fake
    link; sets stay DRAFT).

@@ -1,91 +1,57 @@
 import { z } from "zod";
 
 /**
- * Runtime-validated shape of a single research candidate returned by the AI.
- * The pipeline rejects anything that does not parse, so malformed / hallucinated
- * structures never reach the database.
+ * Runtime-validated shapes for the discovery pipeline. The AI's job is split:
+ *   1. researchTrend  -> the emerging trend + AliExpress search phrases + signals
+ *   2. (code) real AliExpress search -> real candidate products
+ *   3. pickProduct    -> choose the best REAL candidate + relevance
+ *   4. score / copy   -> as before
+ *
+ * The AI never supplies product URLs / images / prices, so it cannot fabricate
+ * them.
  */
 
 export const signalLevelSchema = z
   .enum(["VERY_HIGH", "HIGH", "MEDIUM", "LOW", "UNKNOWN"])
   .catch("UNKNOWN");
 
-const confidenceSchema = z
-  .enum(["VERIFIED", "ESTIMATED", "UNAVAILABLE"])
-  .catch("UNAVAILABLE");
+export const socialSignalsSchema = z.object({
+  tiktok: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
+  instagram: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
+  youtube: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
+  googleTrends: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
+  verifiedMetrics: z.record(z.any()).nullable().optional(),
+});
 
-export const researchCandidateSchema = z.object({
+export const sourcesSchema = z
+  .array(
+    z.object({
+      url: z.string().url(),
+      title: z.string().nullable().optional(),
+      sourceType: z
+        .enum(["tiktok", "instagram", "youtube", "google_trends", "aliexpress", "web"])
+        .catch("web"),
+      supports: z.enum(["trend", "product", "price", "rating", "orders", "other"]).catch("other"),
+      relevance: z.string().max(500).optional().default(""),
+    }),
+  )
+  .max(40)
+  .optional()
+  .default([]);
+
+export const trendResearchSchema = z.object({
   trend: z.object({
     title: z.string().min(2).max(200),
     description: z.string().min(10).max(2000),
     category: z.string().min(2).max(50),
     whyEmergingNotSaturated: z.string().max(2000).optional().default(""),
-    keywordsSearched: z.array(z.string()).max(40).optional().default([]),
   }),
-  productFound: z.boolean(),
+  /** AliExpress search phrases (plain product keywords, NOT "site:" queries). */
+  searchQueries: z.array(z.string().min(2).max(80)).min(1).max(8),
+  productFound: z.boolean().optional().default(true),
   rejectionReason: z.string().max(2000).nullable().optional(),
-  product: z
-    .object({
-      aeTitle: z.string().min(2).max(400),
-      aeDescription: z.string().max(8000).nullable().optional(),
-      aeUrl: z.string().url(),
-      aeProductId: z.string().max(40).nullable().optional(),
-      aeStoreName: z.string().max(200).nullable().optional(),
-      aeImages: z.array(z.string().url()).max(20).optional().default([]),
-      aeRating: z.number().min(0).max(5).nullable().optional(),
-      aeOrders: z.number().int().min(0).nullable().optional(),
-      priceOriginal: z.number().min(0).nullable().optional(),
-      currencyOriginal: z.string().max(8).nullable().optional(),
-      priceShipping: z.number().min(0).nullable().optional(),
-      shippingVerified: z.boolean().optional().default(false),
-      aeVariants: z
-        .array(z.object({ name: z.string(), options: z.array(z.string()) }))
-        .nullable()
-        .optional(),
-      dataConfidence: z
-        .object({
-          title: confidenceSchema,
-          price: confidenceSchema,
-          rating: confidenceSchema,
-          orders: confidenceSchema,
-          images: confidenceSchema,
-          shipping: confidenceSchema,
-          url: confidenceSchema,
-        })
-        .partial()
-        .optional()
-        .default({}),
-      candidateListingsCompared: z
-        .array(z.object({ url: z.string(), note: z.string().optional().default("") }))
-        .optional()
-        .default([]),
-    })
-    .nullable()
-    .optional(),
-  socialSignals: z.object({
-    tiktok: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
-    instagram: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
-    youtube: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
-    googleTrends: z.object({ level: signalLevelSchema, reasoning: z.string().max(1200).optional().default("") }),
-    verifiedMetrics: z.record(z.any()).nullable().optional(),
-  }),
-  sources: z
-    .array(
-      z.object({
-        url: z.string().url(),
-        title: z.string().nullable().optional(),
-        sourceType: z
-          .enum(["tiktok", "instagram", "youtube", "google_trends", "aliexpress", "web"])
-          .catch("web"),
-        supports: z
-          .enum(["trend", "product", "price", "rating", "orders", "other"])
-          .catch("other"),
-        relevance: z.string().max(500).optional().default(""),
-      }),
-    )
-    .max(40)
-    .optional()
-    .default([]),
+  socialSignals: socialSignalsSchema,
+  sources: sourcesSchema,
   selfAssessment: z
     .object({
       viralPotential: z.number().min(0).max(100).optional(),
@@ -98,8 +64,15 @@ export const researchCandidateSchema = z.object({
     .optional()
     .default({}),
 });
+export type TrendResearch = z.infer<typeof trendResearchSchema>;
 
-export type ResearchCandidate = z.infer<typeof researchCandidateSchema>;
+export const productPickSchema = z.object({
+  chosenProductId: z.string().min(3).nullable(),
+  relevance: z.number().min(0).max(100),
+  rejectionReason: z.string().max(1000).nullable().optional(),
+  reasoning: z.string().max(1500).optional().default(""),
+});
+export type ProductPick = z.infer<typeof productPickSchema>;
 
 export const scoreSchema = z.object({
   viralPotentialScore: z.number().min(0).max(100),

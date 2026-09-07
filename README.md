@@ -141,25 +141,23 @@ does, or set `AI_PROVIDER=mock` while you sort access.
 
 ## 5. AliExpress research configuration
 
-TrendFinder does **not** use a private AliExpress product API. The AI researches
-public AliExpress product pages via web search. `AliExpressResearchService` then:
+TrendFinder does **not** use a private AliExpress product API, and it does **not**
+let the LLM produce product URLs/images (LLMs hallucinate plausible item ids that
+404). Instead:
 
-- canonicalises the URL to `https://www.aliexpress.com/item/<id>.html`
-- extracts the numeric product id
-- filters image URLs to real Alicdn/AliExpress hosts
-- best-effort fetches the listing's Open Graph tags to **corroborate** (not
-  invent) title / image / price, downgrading `dataConfidence` when it can't
-- runs a data-quality gate (needs a valid URL + title + image-or-price + at
-  least one verified field)
+1. the AI returns the **trend** + 3–6 plain **search phrases**
+2. `src/services/aliexpress/aeSearch.ts` requests the real public search page
+   `https://www.aliexpress.com/w/wholesale-<phrase>.html` (forcing `en_US`/`USD`
+   via cookie) and parses the `itemList.content[]` JSON AliExpress embeds in the
+   page — real product id, canonical URL, image, price, star rating, order count
+3. `AliExpressResearchService.gatherCandidates` de-dupes + ranks the real
+   listings; `TrendResearchService.pickProduct` has the AI choose the best match
+4. a data-quality gate requires a real image **and** a price
 
-Search templates are editable in **Admin → Settings**
-(`aliexpressSearchTemplates`), e.g.:
-
-```
-site:aliexpress.com "{keyword}"
-site:aliexpress.com/item "{keyword}"
-site:aliexpress.com "{trendKeyword}"
-```
+Every stored product field is real listing data. `AI_PROVIDER=mock` swaps in
+deterministic synthetic search results so the pipeline runs offline. If
+AliExpress ever starts blocking the server, `aeSearch.ts` is the one place to add
+a proxy / scraper-API fallback.
 
 ### No-hallucination policy
 

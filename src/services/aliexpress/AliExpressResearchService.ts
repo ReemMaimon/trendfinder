@@ -1,31 +1,25 @@
 import { logger } from "@/lib/logger";
-import { prisma } from "@/lib/db";
-import type { ResearchCandidate } from "@/services/types";
+import { searchAliExpress, type AeSearchItem } from "./aeSearch";
 
 /**
- * TrendFinder does NOT use a private AliExpress product API. The AI/web-search
- * layer finds AliExpress product pages and extracts the data. This service is
- * the validation + light-corroboration layer on top of that:
+ * TrendFinder does NOT use a private AliExpress API and does NOT let the LLM
+ * invent product URLs / images (it hallucinates fake item ids). Instead:
  *
- *   - normalise the product URL to its canonical /item/<id>.html form
- *   - pull the numeric product id out of the URL when the AI didn't
- *   - drop image URLs that aren't plausible AliExpress/Alicdn assets
- *   - best-effort fetch of the listing's Open Graph meta tags to CORROBORATE
- *     the AI's title/image/price (never to invent values)
- *   - downgrade dataConfidence when corroboration fails
+ *   1. the AI produces the TREND + a set of search phrases
+ *   2. THIS service runs those phrases against AliExpress's real public search
+ *      results page and parses the embedded product JSON
+ *   3. every product returned is a real listing — real id, real canonical URL,
+ *      real image, real price, real rating, real order count
  *
- * It must be resilient: AliExpress frequently blocks bots, so a failed fetch is
- * expected and simply means "not additionally corroborated".
+ * The AI then only picks the best match from these real candidates.
  */
 
 const AE_HOST_RE = /(^|\.)aliexpress\.com$/i;
-const IMG_HOST_RE = /(alicdn\.com|aliexpress-media\.com|aliexpress\.com)$/i;
 
-export interface NormalizedProduct {
+export interface RealProduct {
   aeTitle: string;
-  aeDescription: string | null;
   aeUrl: string;
-  aeProductId: string | null;
+  aeProductId: string;
   aeStoreName: string | null;
   aeImages: string[];
   aeRating: number | null;
@@ -34,249 +28,104 @@ export interface NormalizedProduct {
   currencyOriginal: string | null;
   priceShipping: number | null;
   shippingVerified: boolean;
-  aeVariants: { name: string; options: string[] }[] | null;
+  aeVariants: null;
   dataConfidence: Record<string, "VERIFIED" | "ESTIMATED" | "UNAVAILABLE">;
-  candidateListingsCompared: { url: string; note: string }[];
-  corroboration: {
-    urlReachable: boolean | null;
-    ogTitle: string | null;
-    ogImage: string | null;
-    notes: string[];
+}
+
+export interface TrendProductSearch {
+  query: string;
+  results: AeSearchItem[];
+}
+
+function toRealProduct(item: AeSearchItem): RealProduct {
+  return {
+    aeTitle: item.title,
+    aeUrl: item.url,
+    aeProductId: item.productId,
+    aeStoreName: item.storeName,
+    aeImages: item.images,
+    aeRating: item.rating,
+    aeOrders: item.orders,
+    priceOriginal: item.priceOriginal,
+    currencyOriginal: item.currencyOriginal,
+    priceShipping: null,
+    shippingVerified: false,
+    aeVariants: null,
+    dataConfidence: {
+      title: "VERIFIED",
+      url: "VERIFIED",
+      images: item.images.length ? "VERIFIED" : "UNAVAILABLE",
+      price: item.priceOriginal != null ? "VERIFIED" : "UNAVAILABLE",
+      rating: item.rating != null ? "VERIFIED" : "UNAVAILABLE",
+      orders: item.orders != null ? "VERIFIED" : "UNAVAILABLE",
+      shipping: "UNAVAILABLE",
+    },
   };
 }
 
 function canonicalUrl(rawUrl: string): { url: string; id: string | null } {
   try {
     const u = new URL(rawUrl.trim());
-    if (!AE_HOST_RE.test(u.hostname)) {
-      return { url: rawUrl, id: null };
-    }
+    if (!AE_HOST_RE.test(u.hostname)) return { url: rawUrl, id: null };
     const m = u.pathname.match(/\/item\/(?:[\w-]+\/)?(\d{6,})\.html/);
-    if (m) {
-      return { url: `https://www.aliexpress.com/item/${m[1]}.html`, id: m[1] };
-    }
-    const idParam = u.searchParams.get("productId") || u.searchParams.get("id");
+    if (m) return { url: `https://www.aliexpress.com/item/${m[1]}.html`, id: m[1] };
     u.search = "";
     u.hash = "";
-    return { url: u.toString(), id: idParam && /^\d{6,}$/.test(idParam) ? idParam : null };
+    return { url: u.toString(), id: null };
   } catch {
     return { url: rawUrl, id: null };
   }
 }
 
-function cleanImages(images: string[]): string[] {
-  const out: string[] = [];
-  for (const raw of images) {
-    try {
-      const u = new URL(raw.startsWith("//") ? `https:${raw}` : raw);
-      if (u.protocol !== "https:") continue;
-      if (!IMG_HOST_RE.test(u.hostname)) continue;
-      const normalized = u.toString();
-      if (!out.includes(normalized)) out.push(normalized);
-    } catch {
-      /* skip */
-    }
-  }
-  return out.slice(0, 12);
-}
-
-function parseMeta(html: string): { ogTitle: string | null; ogImage: string | null; price: number | null; currency: string | null } {
-  const pick = (prop: string) => {
-    const re = new RegExp(
-      `<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`,
-      "i",
-    );
-    return html.match(re)?.[1] ?? null;
-  };
-  const ogTitle = pick("og:title");
-  let ogImage = pick("og:image");
-  if (ogImage && ogImage.startsWith("//")) ogImage = `https:${ogImage}`;
-  const priceStr = pick("og:price:amount") || pick("product:price:amount");
-  const currency = pick("og:price:currency") || pick("product:price:currency");
-  const price = priceStr ? Number(priceStr) : null;
-  return {
-    ogTitle,
-    ogImage,
-    price: price != null && isFinite(price) ? price : null,
-    currency,
-  };
-}
-
-async function corroborate(url: string, runId?: string) {
-  const started = Date.now();
-  const result = { urlReachable: null as boolean | null, ogTitle: null as string | null, ogImage: null as string | null, price: null as number | null, currency: null as string | null };
-  try {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(9000),
-    });
-    result.urlReachable = res.ok;
-    if (res.ok) {
-      const html = await res.text();
-      const meta = parseMeta(html);
-      result.ogTitle = meta.ogTitle;
-      result.ogImage = meta.ogImage;
-      result.price = meta.price;
-      result.currency = meta.currency;
-    }
-    await prisma.apiLog
-      .create({
-        data: {
-          runId: runId ?? null,
-          provider: "aliexpress-fetch",
-          operation: "corroborate-listing",
-          ok: res.ok,
-          httpStatus: res.status,
-          durationMs: Date.now() - started,
-          meta: { url, gotOgTitle: Boolean(result.ogTitle), gotPrice: result.price != null },
-        },
-      })
-      .catch(() => {});
-  } catch (err) {
-    logger.debug({ err, url }, "AliExpress corroboration fetch failed (expected when blocked)");
-    await prisma.apiLog
-      .create({
-        data: {
-          runId: runId ?? null,
-          provider: "aliexpress-fetch",
-          operation: "corroborate-listing",
-          ok: false,
-          durationMs: Date.now() - started,
-          errorText: String(err),
-          meta: { url },
-        },
-      })
-      .catch(() => {});
-  }
-  return result;
-}
-
 export const AliExpressResearchService = {
   /**
-   * Validate + normalise + corroborate the product portion of a research
-   * candidate. Returns null when the product is unusable (no valid URL).
+   * Run each search phrase against AliExpress and collect real, de-duplicated
+   * candidate products for a trend.
    */
-  async normalize(
-    candidate: ResearchCandidate,
-    opts: { corroborate?: boolean; runId?: string } = {},
-  ): Promise<NormalizedProduct | null> {
-    const p = candidate.product;
-    if (!p || !p.aeUrl) return null;
+  async gatherCandidates(
+    queries: string[],
+    opts: { excludeProductIds?: Set<string>; perQuery?: number; maxTotal?: number } = {},
+  ): Promise<{ searches: TrendProductSearch[]; candidates: AeSearchItem[] }> {
+    const exclude = opts.excludeProductIds ?? new Set<string>();
+    const seen = new Set<string>();
+    const searches: TrendProductSearch[] = [];
+    const candidates: AeSearchItem[] = [];
 
-    const { url, id } = canonicalUrl(p.aeUrl);
-    let host: string;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      return null;
-    }
-    if (!AE_HOST_RE.test(host)) {
-      logger.warn({ url }, "candidate product URL is not on aliexpress.com — rejecting");
-      return null;
-    }
-
-    const confidence: Record<string, "VERIFIED" | "ESTIMATED" | "UNAVAILABLE"> = {
-      title: p.dataConfidence?.title ?? "ESTIMATED",
-      price: p.dataConfidence?.price ?? "UNAVAILABLE",
-      rating: p.dataConfidence?.rating ?? "UNAVAILABLE",
-      orders: p.dataConfidence?.orders ?? "UNAVAILABLE",
-      images: p.dataConfidence?.images ?? "UNAVAILABLE",
-      shipping: p.dataConfidence?.shipping ?? "UNAVAILABLE",
-      url: "VERIFIED",
-    };
-
-    const images = cleanImages(p.aeImages ?? []);
-    if (images.length === 0) confidence.images = "UNAVAILABLE";
-
-    const notes: string[] = [];
-    let corr = {
-      urlReachable: null as boolean | null,
-      ogTitle: null as string | null,
-      ogImage: null as string | null,
-      price: null as number | null,
-      currency: null as string | null,
-    };
-
-    if (opts.corroborate) {
-      corr = await corroborate(url, opts.runId);
-      if (corr.urlReachable === false) {
-        notes.push("URL returned a non-OK status at corroboration time.");
-        confidence.url = "ESTIMATED";
+    for (const query of queries.slice(0, 6)) {
+      const results = await searchAliExpress(query, { limit: opts.perQuery ?? 12 });
+      searches.push({ query, results });
+      for (const r of results) {
+        if (exclude.has(r.productId) || seen.has(r.productId)) continue;
+        // must have an image and a price to be usable
+        if (!r.images.length || r.priceOriginal == null) continue;
+        seen.add(r.productId);
+        candidates.push(r);
       }
-      if (corr.ogTitle && p.aeTitle) {
-        // light corroboration only
-        confidence.title = "VERIFIED";
-        notes.push("Title corroborated via Open Graph meta.");
-      }
-      if (corr.price != null && p.priceOriginal != null) {
-        const diff = Math.abs(corr.price - p.priceOriginal) / p.priceOriginal;
-        if (diff <= 0.2) {
-          confidence.price = "VERIFIED";
-          notes.push(`Price corroborated (meta ${corr.price}).`);
-        } else {
-          confidence.price = "ESTIMATED";
-          notes.push(
-            `AI price ${p.priceOriginal} differs from meta price ${corr.price}; kept AI value, lowered confidence.`,
-          );
-        }
-      }
-      if (corr.ogImage && !images.includes(corr.ogImage)) {
-        try {
-          const ih = new URL(corr.ogImage).hostname;
-          if (IMG_HOST_RE.test(ih)) images.unshift(corr.ogImage);
-        } catch {
-          /* ignore */
-        }
-      }
+      if (candidates.length >= (opts.maxTotal ?? 24)) break;
     }
 
-    return {
-      aeTitle: p.aeTitle,
-      aeDescription: p.aeDescription ?? null,
-      aeUrl: url,
-      aeProductId: p.aeProductId ?? id,
-      aeStoreName: p.aeStoreName ?? null,
-      aeImages: images,
-      aeRating: p.aeRating ?? null,
-      aeOrders: p.aeOrders ?? null,
-      priceOriginal: p.priceOriginal ?? null,
-      currencyOriginal: p.currencyOriginal ?? corr.currency ?? null,
-      priceShipping: p.priceShipping ?? null,
-      shippingVerified: Boolean(p.shippingVerified && p.priceShipping != null),
-      aeVariants: p.aeVariants ?? null,
-      dataConfidence: confidence,
-      candidateListingsCompared: p.candidateListingsCompared ?? [],
-      corroboration: {
-        urlReachable: corr.urlReachable,
-        ogTitle: corr.ogTitle,
-        ogImage: corr.ogImage,
-        notes,
-      },
-    };
+    candidates.sort((a, b) => b._score - a._score);
+    logger.info(
+      { queries: queries.length, candidates: candidates.length },
+      "AliExpress candidate gathering complete",
+    );
+    return { searches, candidates: candidates.slice(0, opts.maxTotal ?? 24) };
   },
 
+  /** Convert a chosen real search item into the stored product shape. */
+  toRealProduct,
+
   /**
-   * Data-quality gate. A product must have a valid URL, a title, at least one
-   * image OR a verified price, and must not be entirely unverifiable.
+   * Quality gate for a real product. Because the data now comes from the real
+   * listing JSON, this mostly guards against thin results.
    */
-  qualityCheck(np: NormalizedProduct): { ok: boolean; reason?: string } {
-    if (!np.aeUrl) return { ok: false, reason: "missing product URL" };
-    if (!np.aeTitle || np.aeTitle.length < 3)
+  qualityCheck(p: RealProduct): { ok: boolean; reason?: string } {
+    if (!p.aeUrl || !AE_HOST_RE.test(new URL(p.aeUrl).hostname))
+      return { ok: false, reason: "invalid product URL" };
+    if (!p.aeTitle || p.aeTitle.length < 5)
       return { ok: false, reason: "missing product title" };
-    const hasImage = np.aeImages.length > 0;
-    const hasPrice = np.priceOriginal != null;
-    if (!hasImage && !hasPrice)
-      return { ok: false, reason: "no image and no price — insufficient real data" };
-    const verifiedCount = Object.values(np.dataConfidence).filter(
-      (c) => c === "VERIFIED",
-    ).length;
-    if (verifiedCount === 0)
-      return { ok: false, reason: "no field could be verified" };
+    if (!p.aeImages.length) return { ok: false, reason: "no product image" };
+    if (p.priceOriginal == null) return { ok: false, reason: "no price" };
     return { ok: true };
   },
 
