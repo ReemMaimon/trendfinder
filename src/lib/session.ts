@@ -23,13 +23,16 @@ export async function verifyCredentials(
   username: string,
   password: string,
 ): Promise<AdminSession> {
-  const dbUser = await prisma.adminUser.findUnique({ where: { username } });
-  if (dbUser && (await bcrypt.compare(password, dbUser.passwordHash))) {
-    await prisma.adminUser.update({
-      where: { id: dbUser.id },
-      data: { lastLoginAt: new Date() },
-    });
-    return { sub: dbUser.id, username: dbUser.username };
+  try {
+    const dbUser = await prisma.adminUser.findUnique({ where: { username } });
+    if (dbUser && (await bcrypt.compare(password, dbUser.passwordHash))) {
+      await prisma.adminUser
+        .update({ where: { id: dbUser.id }, data: { lastLoginAt: new Date() } })
+        .catch(() => {});
+      return { sub: dbUser.id, username: dbUser.username };
+    }
+  } catch {
+    // DB unreachable — fall back to the env-configured admin below.
   }
 
   if (
