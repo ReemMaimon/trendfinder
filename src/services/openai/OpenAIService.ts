@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { env, canUseOpenAI } from "@/lib/env";
+import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/db";
 import { ConfigError } from "@/lib/errors";
@@ -223,10 +223,18 @@ let cached: AIProvider | null = null;
 
 export async function getAIProvider(): Promise<AIProvider> {
   if (cached) return cached;
-  if (env.AI_PROVIDER === "mock" || !canUseOpenAI) {
+  if (env.AI_PROVIDER === "mock") {
     const { MockAIProvider } = await import("./MockAIProvider");
     cached = new MockAIProvider();
   } else {
+    // AI_PROVIDER=openai — do NOT silently fall back to mock. If the key is
+    // missing the generation run must fail loudly so the operator sees why.
+    if (!env.OPENAI_API_KEY) {
+      throw new ConfigError(
+        "AI_PROVIDER=openai but OPENAI_API_KEY is empty. Add your OpenAI key to .env and restart the server. " +
+          "(Set AI_PROVIDER=mock to intentionally run with offline fake data.)",
+      );
+    }
     cached = new OpenAIRealProvider();
   }
   logger.info({ provider: cached.name }, "AI provider initialised");
