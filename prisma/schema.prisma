@@ -1,0 +1,357 @@
+// TrendFinder database schema
+// Relational model (PostgreSQL). Historical data is never overwritten.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  lastLoginAt  DateTime?
+
+  @@map("admin_users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings — single mutable configuration row (id = "singleton")
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Setting {
+  id        String   @id @default("singleton")
+  // Free-form JSON blob validated by SettingsService against a zod schema.
+  // Holds: scoringWeights, diversityRules, researchInstructions,
+  // maxCandidates, promptVersion, appModeOverride, etc.
+  data      Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Daily product sets
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DailyProductSet {
+  id          String   @id @default(cuid())
+  // The Asia/Jerusalem calendar date this set is published for, as YYYY-MM-DD.
+  date        String   @unique
+  status      DailySetStatus @default(DRAFT)
+  publishedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  generationRunId String?
+  generationRun   GenerationRun? @relation(fields: [generationRunId], references: [id])
+
+  items DailyProductItem[]
+
+  @@index([date])
+  @@map("daily_product_sets")
+}
+
+enum DailySetStatus {
+  DRAFT
+  PUBLISHED
+}
+
+// Join row: which products, in what order, and whether reused as fallback.
+model DailyProductItem {
+  id         String   @id @default(cuid())
+  set        DailyProductSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+  setId      String
+  product    Product  @relation(fields: [productId], references: [id])
+  productId  String
+  position   Int      // 1..3
+  reused     Boolean  @default(false) // true => fallback product from a prior day
+  reusedFromDate String?
+
+  @@unique([setId, position])
+  @@unique([setId, productId])
+  @@map("daily_product_items")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Products — the real AliExpress listing + AI analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Product {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // --- Trend (AI generated) ---
+  trendTitle       String   // short label of the emerging trend
+  trendDescription String   @db.Text
+  category         String   // one of config/categories
+  slug             String   @unique
+
+  // --- AliExpress listing (REAL data — nullable when unverifiable) ---
+  aeTitle          String
+  aeDescription    String?  @db.Text
+  aeUrl            String              // canonical product URL (non-affiliate)
+  aeProductId      String?             // numeric item id if extractable
+  aeStoreName      String?
+  aeImages         Json                // string[] of image URLs
+  aeRating         Float?              // 0..5
+  aeOrders         Int?                // order / sales count
+  aeVariants       Json?               // [{name, options:[...]}]
+
+  // --- Pricing ---
+  priceOriginal        Float?
+  currencyOriginal     String?
+  priceShipping        Float?          // null unless verified
+  shippingVerified     Boolean  @default(false)
+  priceIls             Float?          // converted display price
+  priceIlsTotal        Float?          // incl. shipping, only if shippingVerified
+  fxRateUsed           Float?
+  fxAsOf               DateTime?
+
+  // --- Data provenance ---
+  dataConfidence   Json     // { rating: "VERIFIED"|"ESTIMATED"|"UNAVAILABLE", ... }
+
+  // --- Scores (0..100) ---
+  viralPotentialScore     Int
+  affiliatePotentialScore Int
+  noveltyScore            Int
+  trendMomentumScore      Int
+  saturationScore         Int
+  overallScore            Int
+
+  // --- User-facing explanation (Hebrew) ---
+  explanationHe    String   @db.Text
+
+  // --- Origin ---
+  generationRunId  String?
+  generationRun    GenerationRun? @relation(fields: [generationRunId], references: [id])
+  origin           ProductOrigin @default(AI)
+
+  trendReport  ProductTrendReport?
+  sources      TrendSource[]
+  dailyItems   DailyProductItem[]
+  views        ProductView[]
+  clicks       ProductClick[]
+
+  @@index([category])
+  @@index([overallScore])
+  @@map("products")
+}
+
+enum ProductOrigin {
+  AI          // produced by the generation pipeline
+  MANUAL      // added by an admin
+}
+
+// Per-platform social signal report.
+model ProductTrendReport {
+  id        String  @id @default(cuid())
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String  @unique
+
+  tiktokLevel        SignalLevel @default(UNKNOWN)
+  tiktokReasoning    String?     @db.Text
+  instagramLevel     SignalLevel @default(UNKNOWN)
+  instagramReasoning String?     @db.Text
+  youtubeLevel       SignalLevel @default(UNKNOWN)
+  youtubeReasoning   String?     @db.Text
+  googleTrendsLevel  SignalLevel @default(UNKNOWN)
+  googleTrendsReasoning String?  @db.Text
+
+  // Optional verified numeric datapoints only (never fabricated).
+  verifiedMetrics    Json?
+
+  overallReasoningHe String @db.Text
+
+  @@map("product_trend_reports")
+}
+
+enum SignalLevel {
+  VERY_HIGH
+  HIGH
+  MEDIUM
+  LOW
+  UNKNOWN
+}
+
+// A web source the AI actually consulted.
+model TrendSource {
+  id         String   @id @default(cuid())
+  product    Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId  String?
+  run        GenerationRun? @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runId      String?
+
+  url        String
+  title      String?
+  sourceType String   // "tiktok"|"instagram"|"youtube"|"google_trends"|"aliexpress"|"web"
+  foundAt    DateTime @default(now())
+  relevance  String?  // short note of what it supports
+  supports   String?  // "trend" | "product" | "price" | "rating" ...
+
+  @@index([productId])
+  @@index([runId])
+  @@map("trend_sources")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generation runs
+// ─────────────────────────────────────────────────────────────────────────────
+
+model GenerationRun {
+  id           String   @id @default(cuid())
+  targetDate   String   // YYYY-MM-DD (Asia/Jerusalem)
+  startedAt    DateTime @default(now())
+  finishedAt   DateTime?
+  status       RunStatus @default(RUNNING)
+  trigger      RunTrigger
+  mode         String   // APP_MODE snapshot at run time
+  aiModel      String
+  promptVersion String
+
+  durationMs   Int?
+  searchedTopics Json?   // string[]
+  errorLog     Json?     // [{step, message, at}]
+  summary      String?   @db.Text
+  stats        Json?     // { candidatesConsidered, accepted, rejected, fallbackUsed }
+
+  candidates   GenerationCandidate[]
+  products     Product[]
+  dailySets    DailyProductSet[]
+  sources      TrendSource[]
+  apiLogs      ApiLog[]
+
+  @@index([targetDate])
+  @@map("generation_runs")
+}
+
+enum RunStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL   // <3 new products; fallback used
+  FAILED
+}
+
+enum RunTrigger {
+  SCHEDULER
+  MANUAL
+  HTTP_CRON
+}
+
+// Every trend/product candidate the pipeline evaluated (accepted or not).
+model GenerationCandidate {
+  id        String   @id @default(cuid())
+  run       GenerationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runId     String
+  order     Int
+
+  trendTitle       String
+  trendDescription String   @db.Text
+  category         String?
+
+  // AliExpress research outcome
+  aeUrl            String?
+  aeProductId      String?
+  aeTitle          String?
+  aeImages         Json?
+  aeRating         Float?
+  aeOrders         Int?
+  priceOriginal    Float?
+  currencyOriginal String?
+
+  scores           Json?    // full score breakdown
+  socialSignals    Json?    // per-platform levels + reasoning
+  rawResearch      Json?    // raw AI research object for debugging
+
+  status           CandidateStatus
+  rejectionReason  String?  @db.Text
+
+  // set when a candidate becomes a real Product
+  productId        String?
+
+  @@index([runId])
+  @@map("generation_candidates")
+}
+
+enum CandidateStatus {
+  ACCEPTED
+  REJECTED_NO_PRODUCT      // no suitable AliExpress product found
+  REJECTED_DUPLICATE       // same/similar to a recent product
+  REJECTED_SIMILAR         // too similar to another candidate today
+  REJECTED_LOW_SCORE
+  REJECTED_SATURATED
+  REJECTED_DATA_QUALITY
+  REJECTED_OTHER
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics (anonymous)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ProductView {
+  id        String   @id @default(cuid())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  date      String   // YYYY-MM-DD Asia/Jerusalem
+  kind      ViewKind
+  // coarse anonymised visitor hash (ip+ua+day salted) for de-dup / unique counts
+  visitorHash String
+  createdAt DateTime @default(now())
+
+  @@index([productId, date])
+  @@index([date])
+  @@map("product_views")
+}
+
+enum ViewKind {
+  CARD     // appeared/opened on the homepage
+  DETAIL   // product detail page opened
+}
+
+model ProductClick {
+  id        String   @id @default(cuid())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String
+  date      String
+  visitorHash String
+  // "test" (plain url) or "production" (affiliate) — snapshot for auditing
+  linkMode  String
+  createdAt DateTime @default(now())
+
+  @@index([productId, date])
+  @@index([date])
+  @@map("product_clicks")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operational logs
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ApiLog {
+  id        String   @id @default(cuid())
+  run       GenerationRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+  runId     String?
+  provider  String   // "openai" | "currency" | "aliexpress-fetch"
+  operation String
+  ok        Boolean
+  httpStatus Int?
+  durationMs Int?
+  // trimmed request/response metadata — never secrets
+  meta      Json?
+  errorText String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([runId])
+  @@index([provider, createdAt])
+  @@map("api_logs")
+}

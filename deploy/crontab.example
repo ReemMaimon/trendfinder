@@ -1,0 +1,12 @@
+# Backup / alternative scheduler for TrendFinder.
+# Use this if ENABLE_INPROCESS_CRON=false, or alongside the worker for safety
+# (generation is idempotent — a duplicate call does nothing).
+#
+# Hostinger: hPanel -> Advanced -> Cron Jobs, or `crontab -e` on a VPS.
+#
+# IMPORTANT: system cron uses the server's local timezone. Set the server tz to
+# Asia/Jerusalem (`sudo timedatectl set-timezone Asia/Jerusalem`) OR use the
+# CRON_TZ line below (supported by modern cron/Vixie cron).
+
+CRON_TZ=Asia/Jerusalem
+0 0 * * * curl -fsS -m 300 -X POST https://your-domain.com/api/cron/generate -H "x-cron-secret: REPLACE_WITH_CRON_SECRET" >> /home/USER/trendfinder/logs/cron.log 2>&1

@@ -1,0 +1,39 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# env — NEVER commit real secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+/logs
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# testing
+/coverage
+
+# prisma
+/prisma/*.db
+
+# pm2
+.pm2
