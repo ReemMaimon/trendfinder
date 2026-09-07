@@ -388,7 +388,7 @@ async function runPipeline(
             trendTitle: c.trend.title,
             trendDescription: c.trend.description,
             category,
-            slug: makeSlug(c.trend.title, `${targetDate}-${candidateOrder}`),
+            slug: makeSlug(c.trend.title, `${targetDate}-${run.id}-${candidateOrder}`),
             aeTitle: np.aeTitle,
             aeDescription: np.aeDescription,
             aeUrl: np.aeUrl,
