@@ -39,6 +39,7 @@ export const TrendResearchService = {
         avoidTrendTitles: params.avoidTrendTitles,
         alreadyAcceptedCategories: params.alreadyAcceptedCategories,
         enforceDistinctCategories: params.settings.diversityRules.enforceDistinctCategories,
+        noveltyDays: params.settings.diversityRules.historyLookbackDays,
         maxPriceIls: params.maxPriceIls,
         maxPriceUsdApprox: params.maxPriceUsdApprox,
       }),

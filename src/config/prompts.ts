@@ -35,7 +35,7 @@ export function trendResearchSystemPrompt(settings: Settings): string {
     "HARD RULES:",
     "1. Use web search. Look for repeated / rising signals across TikTok, Instagram, YouTube, Google Trends and general web.",
     "2. TREND FIRST. Identify the trend and why it is rising NOW.",
-    "3. Then produce 3-6 SHORT AliExpress search phrases (plain product keywords a shopper would type, e.g. \"sunset projection lamp\", \"magnetic cable organizer\"). Do NOT use \"site:\" operators. Do NOT include URLs.",
+    `3. Then produce 3-6 SHORT AliExpress search phrases (plain product keywords a shopper would type). Model them on these admin examples: ${settings.aliexpressSearchTemplates.join(" | ")}. Do NOT use "site:" operators. Do NOT include URLs.`,
     "4. NEVER invent statistics. Social signal levels are your judgement; only put numbers in verifiedMetrics if a real cited source states them.",
     "5. Prefer novelty + short-video shareability + impulse-buy potential. Avoid products already everywhere.",
     "6. Every `sources[].url` must be a real URL you actually saw in search results. If you have no real URL, return an empty sources array.",
@@ -54,6 +54,7 @@ export function trendResearchUserPrompt(params: {
   avoidTrendTitles: string[];
   alreadyAcceptedCategories: string[];
   enforceDistinctCategories: boolean;
+  noveltyDays: number;
   maxPriceIls?: number | null;
   maxPriceUsdApprox?: number | null;
 }): string {
@@ -63,6 +64,7 @@ export function trendResearchUserPrompt(params: {
     avoidTrendTitles,
     alreadyAcceptedCategories,
     enforceDistinctCategories,
+    noveltyDays,
     maxPriceIls,
     maxPriceUsdApprox,
   } = params;
@@ -85,8 +87,9 @@ export function trendResearchUserPrompt(params: {
       ? `\nBUDGET: the final product must sell for at most ₪${maxPriceIls} (≈ $${maxPriceUsdApprox ?? "?"} USD). Choose a trend whose typical product is well within this budget, and make searchQueries target affordable items.`
       : "",
     "",
-    "AVOID repeating these recently-published trends/products:",
+    `HARD NOVELTY RULE: the trend you return MUST be genuinely new. It must NOT be the same as — or a close variation / re-wording / sibling of — any trend or product published in the last ${noveltyDays} days, listed here:`,
     prevBlock,
+    `(A candidate that resembles any of the above will be rejected. Pick a different product category / use-case / angle.)`,
     avoidTrendTitles.length ? `\nAlso avoid trend angles already tried this run: ${avoidTrendTitles.join("; ")}` : "",
     enforceDistinctCategories && alreadyAcceptedCategories.length
       ? `\nCategories already used today (choose a DIFFERENT one): ${alreadyAcceptedCategories.join(", ")}`

@@ -23,21 +23,32 @@ export const socialSignalsSchema = z.object({
   verifiedMetrics: z.record(z.any()).nullable().optional(),
 });
 
-export const sourcesSchema = z
-  .array(
-    z.object({
-      url: z.string().url(),
-      title: z.string().nullable().optional(),
-      sourceType: z
-        .enum(["tiktok", "instagram", "youtube", "google_trends", "aliexpress", "web"])
-        .catch("web"),
-      supports: z.enum(["trend", "product", "price", "rating", "orders", "other"]).catch("other"),
-      relevance: z.string().max(500).optional().default(""),
-    }),
-  )
-  .max(40)
-  .optional()
-  .default([]);
+// Drop malformed source entries (bad/empty URLs) instead of failing the whole
+// research object — a stray source URL should not sink an otherwise-good trend.
+export const sourcesSchema = z.preprocess(
+  (val) => {
+    if (!Array.isArray(val)) return [];
+    return val.filter(
+      (s) =>
+        s && typeof s === "object" && typeof (s as any).url === "string" &&
+        /^https?:\/\/\S+$/i.test((s as any).url),
+    );
+  },
+  z
+    .array(
+      z.object({
+        url: z.string().url(),
+        title: z.string().nullable().optional(),
+        sourceType: z
+          .enum(["tiktok", "instagram", "youtube", "google_trends", "aliexpress", "web"])
+          .catch("web"),
+        supports: z.enum(["trend", "product", "price", "rating", "orders", "other"]).catch("other"),
+        relevance: z.string().max(500).optional().default(""),
+      }),
+    )
+    .max(40)
+    .default([]),
+);
 
 export const trendResearchSchema = z.object({
   trend: z.object({

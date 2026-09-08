@@ -55,14 +55,17 @@ export default function SettingsPage() {
         </label>
       </Card>
 
-      <Card title="תבניות חיפוש AliExpress (שורה לכל תבנית)">
+      <Card title="דוגמאות לביטויי חיפוש AliExpress (הנחיה ל-AI, שורה לכל דוגמה)">
         <textarea
           className={input}
           rows={5}
           value={draft.aliexpressSearchTemplates.join("\n")}
           onChange={(e) => setTop("aliexpressSearchTemplates", e.target.value.split(/\s*\n\s*/).filter(Boolean))}
         />
-        <p className="mt-1 text-xs text-gray-500">{"נתמכים placeholders: {keyword} , {trendKeyword}"}</p>
+        <p className="mt-1 text-xs text-gray-500">
+          ביטויים פשוטים כמו שקונה היה מקליד (למשל &quot;sunset projection lamp&quot;). ה-AI מבסס עליהם את
+          ביטויי החיפוש שהוא מייצר. בלי &quot;site:&quot; ובלי קישורים.
+        </p>
       </Card>
 
       <Card title="פרמטרים של הפייפליין">
@@ -105,16 +108,20 @@ export default function SettingsPage() {
         </p>
       </Card>
 
-      <Card title="כללי גיוון">
+      <Card title="כללי גיוון וחדשנות">
         <div className="grid grid-cols-2 gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={draft.diversityRules.enforceDistinctCategories} onChange={(e) => setD("enforceDistinctCategories", e.target.checked)} />
             אכיפת קטגוריות שונות
           </label>
-          <label className="text-sm">דמיון כותרת מקס' (0-1)<input type="number" step="0.05" className={input} value={draft.diversityRules.maxTitleSimilarity} onChange={(e) => setD("maxTitleSimilarity", Number(e.target.value))} /></label>
-          <label className="text-sm">ימי היסטוריה<input type="number" className={input} value={draft.diversityRules.historyLookbackDays} onChange={(e) => setD("historyLookbackDays", Number(e.target.value))} /></label>
-          <label className="text-sm">דמיון היסטוריה מקס' (0-1)<input type="number" step="0.05" className={input} value={draft.diversityRules.maxHistorySimilarity} onChange={(e) => setD("maxHistorySimilarity", Number(e.target.value))} /></label>
+          <label className="text-sm">דמיון כותרת מקס' בין מוצרי היום (0-1)<input type="number" step="0.05" className={input} value={draft.diversityRules.maxTitleSimilarity} onChange={(e) => setD("maxTitleSimilarity", Number(e.target.value))} /></label>
+          <label className="text-sm">חלון חדשנות (ימים)<input type="number" min={0} className={input} value={draft.diversityRules.historyLookbackDays} onChange={(e) => setD("historyLookbackDays", Number(e.target.value))} /></label>
+          <label className="text-sm">דמיון מקס' מול היסטוריה (0-1)<input type="number" step="0.05" className={input} value={draft.diversityRules.maxHistorySimilarity} onChange={(e) => setD("maxHistorySimilarity", Number(e.target.value))} /></label>
         </div>
+        <p className="mt-1 text-xs text-gray-500">
+          חלון חדשנות = מספר הימים שאחורה טרנד/מוצר לא יכול לחזור. כרגע מוגדר 7 —
+          כלומר כל טרנד חייב להיות חדש ביחס ל-7 הימים האחרונים. המספר גם נשלח ל-AI יחד עם רשימת הטרנדים בטווח.
+        </p>
       </Card>
 
       {msg && <ErrorText>{msg}</ErrorText>}

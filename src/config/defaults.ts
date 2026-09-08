@@ -18,10 +18,13 @@ export const scoringWeightsSchema = z.object({
 export const diversityRulesSchema = z.object({
   // reject a candidate if its category already appears in today's accepted set
   enforceDistinctCategories: z.boolean(),
-  // cosine/Jaccard similarity threshold on normalised title+trend tokens
+  // Jaccard similarity threshold on normalised title+trend tokens — used both
+  // between today's picks and against recent history.
   maxTitleSimilarity: z.number().min(0).max(1),
-  // reject if similar to any product shown within the last N days
-  historyLookbackDays: z.number().int().min(0).max(30),
+  // Novelty window: a trend/product may not repeat (or closely resemble one)
+  // published within the last N days. The AI is also given this window and the
+  // list of trends in it, and told the trend must be new.
+  historyLookbackDays: z.number().int().min(0).max(60),
   maxHistorySimilarity: z.number().min(0).max(1),
 });
 
@@ -48,22 +51,22 @@ export type ScoringWeights = z.infer<typeof scoringWeightsSchema>;
 export type DiversityRules = z.infer<typeof diversityRulesSchema>;
 
 export const DEFAULT_SETTINGS: Settings = {
-  promptVersion: "2026-09-08.1",
+  promptVersion: "2026-09-08.2",
   researchInstructions: [
-    "מטרת המחקר: לזהות טרנדים של מוצרים שנמצאים בתחילת עלייה — יש סימנים מוקדמים לעניין גובר, אך הם עדיין לא רוויים לחלוטין.",
-    "עבוד לפי הכלל: קודם טרנד, אחר כך מוצר. אל תחפש מוצרים אקראיים ב-AliExpress ואז תכריז עליהם כטרנדיים.",
-    "בדוק חזרתיות בין פלטפורמות: TikTok, Instagram, YouTube, Google Trends, ותוצאות רשת כלליות.",
+    "מטרת המחקר: לזהות טרנד אחד של מוצר שנמצא בתחילת עלייה — יש סימנים מוקדמים לעניין גובר בכמה פלטפורמות, אך הוא עדיין לא רווי לחלוטין.",
+    "עבוד לפי הכלל: קודם טרנד, אחר כך מוצר. החזר את הטרנד + 3-6 ביטויי חיפוש פשוטים ל-AliExpress. אל תחזיר קישורים, תמונות או מחירים — המערכת מביאה את המוצרים האמיתיים בעצמה.",
+    "בדוק חזרתיות בין פלטפורמות: TikTok, Instagram, YouTube, Google Trends ותוצאות רשת כלליות.",
+    "כלל חדשנות קשיח: הטרנד חייב להיות חדש לחלוטין ביחס לטרנדים ולמוצרים שפורסמו בימים האחרונים (מופיעים ברשימה שתקבל). לא וריאציה, לא ניסוח מחדש, לא 'אח' של אותו רעיון.",
     "העדף מוצרים עם פוטנציאל וידאו קצר חזק, פוטנציאל שיתוף גבוה ופוטנציאל קנייה אימפולסיבית.",
     "הימנע ממוצרים שכבר נמצאים בכל מקום (רוויים).",
-    "לכל טרנד שנבחר, חפש ב-AliExpress מוצרים רלוונטיים, השווה מספר מודעות, ובחר את הטובה ביותר.",
-    "אם לא נמצא מוצר מתאים ואמין ב-AliExpress — דחה את הטרנד ועבור לטרנד אחר.",
-    "אין להמציא מידע. אם ערך אינו ניתן לאימות — החזר null.",
+    "אין להמציא נתונים. ציוני האותות החברתיים הם הערכה שלך; מספרים מדויקים רק אם מקור אמיתי מצטט אותם.",
   ].join("\n"),
+  // Plain AliExpress search phrases the AI should model its `searchQueries` on.
   aliexpressSearchTemplates: [
-    'site:aliexpress.com "{keyword}"',
-    'site:aliexpress.com/item "{keyword}"',
-    'site:aliexpress.com "{trendKeyword}"',
-    'site:aliexpress.com {keyword} review',
+    "{keyword}",
+    "{keyword} portable",
+    "{keyword} rechargeable",
+    "{trendKeyword}",
   ],
   maxCandidates: 20,
   minOverallScore: 55,
@@ -80,8 +83,8 @@ export const DEFAULT_SETTINGS: Settings = {
   diversityRules: {
     enforceDistinctCategories: true,
     maxTitleSimilarity: 0.55,
-    historyLookbackDays: 10,
-    maxHistorySimilarity: 0.6,
+    historyLookbackDays: 7,
+    maxHistorySimilarity: 0.5,
   },
   appModeOverride: null,
 };
