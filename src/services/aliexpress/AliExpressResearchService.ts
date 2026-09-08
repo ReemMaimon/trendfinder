@@ -84,7 +84,13 @@ export const AliExpressResearchService = {
    */
   async gatherCandidates(
     queries: string[],
-    opts: { excludeProductIds?: Set<string>; perQuery?: number; maxTotal?: number } = {},
+    opts: {
+      excludeProductIds?: Set<string>;
+      perQuery?: number;
+      maxTotal?: number;
+      /** hard cap on `priceOriginal` (search currency = USD). */
+      maxPriceUsd?: number;
+    } = {},
   ): Promise<{ searches: TrendProductSearch[]; candidates: AeSearchItem[] }> {
     const exclude = opts.excludeProductIds ?? new Set<string>();
     const seen = new Set<string>();
@@ -92,12 +98,16 @@ export const AliExpressResearchService = {
     const candidates: AeSearchItem[] = [];
 
     for (const query of queries.slice(0, 6)) {
-      const results = await searchAliExpress(query, { limit: opts.perQuery ?? 12 });
+      const results = await searchAliExpress(query, {
+        limit: opts.perQuery ?? 12,
+        maxPriceUsd: opts.maxPriceUsd,
+      });
       searches.push({ query, results });
       for (const r of results) {
         if (exclude.has(r.productId) || seen.has(r.productId)) continue;
         // must have an image and a price to be usable
         if (!r.images.length || r.priceOriginal == null) continue;
+        if (opts.maxPriceUsd && r.priceOriginal > opts.maxPriceUsd) continue;
         seen.add(r.productId);
         candidates.push(r);
       }

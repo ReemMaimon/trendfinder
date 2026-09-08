@@ -26,6 +26,8 @@ export const TrendResearchService = {
     previous: PreviousProductContext[];
     avoidTrendTitles: string[];
     alreadyAcceptedCategories: string[];
+    maxPriceIls?: number | null;
+    maxPriceUsdApprox?: number | null;
     runId?: string;
   }): Promise<TrendAttempt> {
     const ai = await getAIProvider();
@@ -37,6 +39,8 @@ export const TrendResearchService = {
         avoidTrendTitles: params.avoidTrendTitles,
         alreadyAcceptedCategories: params.alreadyAcceptedCategories,
         enforceDistinctCategories: params.settings.diversityRules.enforceDistinctCategories,
+        maxPriceIls: params.maxPriceIls,
+        maxPriceUsdApprox: params.maxPriceUsdApprox,
       }),
       webSearch: true,
       operation: "trend.research.trend",
@@ -62,6 +66,7 @@ export const TrendResearchService = {
   async pickProduct(params: {
     trend: { title: string; description: string; category: string };
     candidates: AeSearchItem[];
+    maxPriceUsdApprox?: number | null;
     runId?: string;
   }): Promise<ProductPick> {
     if (params.candidates.length === 0) {
@@ -71,7 +76,7 @@ export const TrendResearchService = {
     try {
       const res = await ai.generate({
         system: productPickSystemPrompt(),
-        user: productPickUserPrompt(params.trend, params.candidates),
+        user: productPickUserPrompt(params.trend, params.candidates, params.maxPriceUsdApprox),
         light: true,
         operation: "trend.pick.product",
         runId: params.runId,

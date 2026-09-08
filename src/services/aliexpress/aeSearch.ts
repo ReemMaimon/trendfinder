@@ -122,9 +122,14 @@ function mapItem(it: any): AeSearchItem | null {
   };
 }
 
-async function fetchSearchHtml(keywords: string): Promise<string | null> {
+async function fetchSearchHtml(keywords: string, maxPriceUsd?: number): Promise<string | null> {
   const slug = encodeURIComponent(keywords.trim().replace(/\s+/g, "-").slice(0, 120));
-  const url = `https://www.aliexpress.com/w/wholesale-${slug}.html`;
+  let url = `https://www.aliexpress.com/w/wholesale-${slug}.html`;
+  if (maxPriceUsd && maxPriceUsd > 0) {
+    // AliExpress search understands minPrice/maxPrice (in the request currency,
+    // which our LOCALE_COOKIE pins to USD).
+    url += `?minPrice=0&maxPrice=${Math.ceil(maxPriceUsd)}`;
+  }
   const started = Date.now();
   try {
     const res = await fetch(url, {
@@ -221,23 +226,30 @@ function mockResults(keywords: string, limit: number): AeSearchItem[] {
 
 export async function searchAliExpress(
   keywords: string,
-  opts: { limit?: number } = {},
+  opts: { limit?: number; maxPriceUsd?: number } = {},
 ): Promise<AeSearchItem[]> {
   if (env.AI_PROVIDER === "mock") {
-    return mockResults(keywords, opts.limit ?? 20);
+    const m = mockResults(keywords, opts.limit ?? 20);
+    return opts.maxPriceUsd
+      ? m.filter((x) => x.priceOriginal == null || x.priceOriginal <= opts.maxPriceUsd!)
+      : m;
   }
   const wait = 1200 - (Date.now() - lastFetchAt);
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   lastFetchAt = Date.now();
 
-  const html = await fetchSearchHtml(keywords);
+  const html = await fetchSearchHtml(keywords, opts.maxPriceUsd);
   if (!html) return [];
   const raw = extractItems(html);
-  const items = raw
+  let items = raw
     .map(mapItem)
-    .filter((x): x is AeSearchItem => x !== null)
-    .sort((a, b) => b._score - a._score);
+    .filter((x): x is AeSearchItem => x !== null);
+  if (opts.maxPriceUsd && opts.maxPriceUsd > 0) {
+    // belt-and-braces: AliExpress sometimes ignores the URL price filter
+    items = items.filter((x) => x.priceOriginal != null && x.priceOriginal <= opts.maxPriceUsd!);
+  }
+  items.sort((a, b) => b._score - a._score);
 
-  logger.info({ keywords, found: items.length }, "AliExpress search");
+  logger.info({ keywords, found: items.length, maxPriceUsd: opts.maxPriceUsd }, "AliExpress search");
   return items.slice(0, opts.limit ?? 20);
 }

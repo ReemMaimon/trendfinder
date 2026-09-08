@@ -114,6 +114,14 @@ export const CurrencyService = {
     return { priceIls, priceIlsTotal, fxRateUsed: rate, fxAsOf: asOf };
   },
 
+  /** Convert an arbitrary amount between currencies (e.g. an ILS budget to USD
+   *  for the AliExpress search, which returns USD prices). */
+  async convert(amount: number, from: string, to: string): Promise<number> {
+    if (amount == null || !isFinite(amount)) return amount;
+    const { rate } = await fetchRate(from.toUpperCase(), to.toUpperCase());
+    return Math.round(amount * rate * 100) / 100;
+  },
+
   /** Format a number as an ILS string for the UI. */
   formatIls(amount: number | null | undefined): string {
     if (amount == null || !isFinite(amount)) return "לא זמין";

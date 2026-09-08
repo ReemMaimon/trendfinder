@@ -220,6 +220,14 @@ async function runPipeline(
         settings.diversityRules.historyLookbackDays,
       );
 
+      // Price budget: settings.maxProductPriceIls (ILS) -> approx USD for the
+      // AliExpress search (which returns USD prices).
+      const maxPriceIls = settings.maxProductPriceIls;
+      const maxPriceUsd = maxPriceIls
+        ? await CurrencyService.convert(maxPriceIls, env.CURRENCY_DISPLAY, "USD")
+        : null;
+      if (maxPriceIls) emit("budget", `max price ₪${maxPriceIls} (≈ $${maxPriceUsd})`);
+
       let attempt = 0;
       let candidateOrder = 0;
 
@@ -235,6 +243,8 @@ async function runPipeline(
           previous,
           avoidTrendTitles,
           alreadyAcceptedCategories: acceptedDiversity.map((d) => normalizeCategory(d.category)),
+          maxPriceIls,
+          maxPriceUsdApprox: maxPriceUsd,
           runId: run.id,
         });
 
@@ -288,7 +298,7 @@ async function runPipeline(
         ]);
         const { searches, candidates } = await AliExpressResearchService.gatherCandidates(
           r.searchQueries,
-          { excludeProductIds: excludeIds },
+          { excludeProductIds: excludeIds, maxPriceUsd: maxPriceUsd ?? undefined },
         );
         (baseCandidateData.rawResearch as any).aeSearches = searches.map((s) => ({
           query: s.query,
@@ -311,6 +321,7 @@ async function runPipeline(
         const pick = await TrendResearchService.pickProduct({
           trend: r.trend,
           candidates,
+          maxPriceUsdApprox: maxPriceUsd,
           runId: run.id,
         });
         const chosen = pick.chosenProductId
@@ -348,6 +359,26 @@ async function runPipeline(
           emit("reject", `data quality: ${quality.reason}`);
           continue;
         }
+
+        // ---- price budget (hard gate on the converted ILS price)
+        const fx = await CurrencyService.toDisplay({
+          priceOriginal: rp.priceOriginal,
+          currencyOriginal: rp.currencyOriginal,
+          priceShipping: null,
+          shippingVerified: false,
+        });
+        if (maxPriceIls && fx.priceIls != null && fx.priceIls > maxPriceIls) {
+          await prisma.generationCandidate.create({
+            data: {
+              ...(baseCandidateData as any),
+              status: "REJECTED_OTHER",
+              rejectionReason: `over budget: ₪${fx.priceIls} > max ₪${maxPriceIls}`,
+            },
+          });
+          emit("reject", `over budget (₪${fx.priceIls} > ₪${maxPriceIls})`);
+          continue;
+        }
+
         if (pick.relevance < 45) {
           await prisma.generationCandidate.create({
             data: {
@@ -402,12 +433,6 @@ async function runPipeline(
 
         // ---- 6. ACCEPT
         emit("accept", `"${r.trend.title}" -> ${rp.aeTitle} (${acceptedProductIds.length + 1}/3)`);
-        const fx = await CurrencyService.toDisplay({
-          priceOriginal: rp.priceOriginal,
-          currencyOriginal: rp.currencyOriginal,
-          priceShipping: null,
-          shippingVerified: false,
-        });
         const copy = await hebrewCopyFor(r, rp, scored, run.id);
 
         const product = await prisma.product.create({
@@ -483,6 +508,7 @@ async function runPipeline(
           settings.fallbackLookbackDays,
           acceptedProductIds,
           needed,
+          maxPriceIls,
         );
         for (const fp of fallbackProducts) {
           acceptedProductIds.push(fp.id);
@@ -662,6 +688,7 @@ async function pickFallbackProducts(
   lookbackDays: number,
   excludeIds: string[],
   needed: number,
+  maxPriceIls?: number | null,
 ) {
   if (lookbackDays <= 0 || needed <= 0) return [];
   const dates = previousDates(targetDate, Math.min(3, lookbackDays));
@@ -670,6 +697,8 @@ async function pickFallbackProducts(
       set: { date: { in: dates }, status: "PUBLISHED" },
       productId: { notIn: excludeIds.length ? excludeIds : ["__none__"] },
       reused: false,
+      // fallback products must also respect the price budget
+      ...(maxPriceIls ? { product: { priceIls: { lte: maxPriceIls } } } : {}),
     },
     include: { set: true, product: true },
   });

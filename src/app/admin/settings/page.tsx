@@ -71,7 +71,24 @@ export default function SettingsPage() {
           <label className="text-sm">ציון כולל מינ'<input type="number" className={input} value={draft.minOverallScore} onChange={(e) => setTop("minOverallScore", Number(e.target.value))} /></label>
           <label className="text-sm">רוויה מקס'<input type="number" className={input} value={draft.maxSaturationScore} onChange={(e) => setTop("maxSaturationScore", Number(e.target.value))} /></label>
           <label className="text-sm">ימי fallback (0-3)<input type="number" className={input} value={draft.fallbackLookbackDays} onChange={(e) => setTop("fallbackLookbackDays", Number(e.target.value))} /></label>
+          <label className="text-sm">
+            מחיר מקסימלי למוצר (₪)
+            <input
+              type="number"
+              min={0}
+              step="1"
+              placeholder="ללא הגבלה"
+              className={input}
+              value={draft.maxProductPriceIls ?? ""}
+              onChange={(e) =>
+                setTop("maxProductPriceIls", e.target.value === "" ? null : Number(e.target.value))
+              }
+            />
+          </label>
         </div>
+        <p className="mt-1 text-xs text-gray-500">
+          מחיר מקסימלי בשקלים. ריק = ללא הגבלה. התקציב נשלח ל-AI, מסנן את חיפוש AliExpress, וכל מוצר יקר יותר נדחה.
+        </p>
       </Card>
 
       <Card title="משקלי ניקוד">

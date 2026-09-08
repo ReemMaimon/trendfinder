@@ -290,6 +290,7 @@ auth, `computeOverall` scoring.
 | Diversity / similarity rules | Admin → Settings → *כללי גיוון* |
 | Categories | `src/config/categories.ts` (+ Hebrew labels) |
 | Candidate attempts / min score / saturation cap / fallback days | Admin → Settings |
+| **Max product price** (₪) | Admin → Settings → *מחיר מקסימלי למוצר* — empty = no limit. Sent to the AI, filters the AliExpress search, and hard-rejects (incl. fallback) any product above it. |
 | Currency target / provider | `.env` (`CURRENCY_DISPLAY`, `CURRENCY_PROVIDER`) |
 
 ---

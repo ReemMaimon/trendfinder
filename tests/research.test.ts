@@ -3,7 +3,7 @@ import { extractJson } from "@/services/openai/OpenAIService";
 import { trendResearchSchema, productPickSchema } from "@/services/types";
 import { MockAIProvider } from "@/services/openai/MockAIProvider";
 import { AliExpressResearchService } from "@/services/aliexpress/AliExpressResearchService";
-import { parseOrders } from "@/services/aliexpress/aeSearch";
+import { parseOrders, searchAliExpress } from "@/services/aliexpress/aeSearch";
 
 describe("extractJson", () => {
   it("parses fenced json", () => {
@@ -45,6 +45,16 @@ describe("MockAIProvider produces schema-valid payloads", () => {
     });
     const parsed = productPickSchema.parse(extractJson(res.text));
     expect(parsed.chosenProductId).toBe("1005006789012345");
+  });
+});
+
+describe("searchAliExpress price budget (mock provider)", () => {
+  it("excludes results above maxPriceUsd", async () => {
+    const all = await searchAliExpress("cheap gadget");
+    const capped = await searchAliExpress("cheap gadget", { maxPriceUsd: 5 });
+    expect(all.length).toBeGreaterThan(0);
+    expect(capped.every((x) => (x.priceOriginal ?? 0) <= 5)).toBe(true);
+    expect(capped.length).toBeLessThanOrEqual(all.length);
   });
 });
 

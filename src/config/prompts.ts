@@ -54,9 +54,18 @@ export function trendResearchUserPrompt(params: {
   avoidTrendTitles: string[];
   alreadyAcceptedCategories: string[];
   enforceDistinctCategories: boolean;
+  maxPriceIls?: number | null;
+  maxPriceUsdApprox?: number | null;
 }): string {
-  const { targetDate, previous, avoidTrendTitles, alreadyAcceptedCategories, enforceDistinctCategories } =
-    params;
+  const {
+    targetDate,
+    previous,
+    avoidTrendTitles,
+    alreadyAcceptedCategories,
+    enforceDistinctCategories,
+    maxPriceIls,
+    maxPriceUsdApprox,
+  } = params;
 
   const prevBlock =
     previous.length === 0
@@ -72,6 +81,9 @@ export function trendResearchUserPrompt(params: {
     `Target publish date: ${targetDate} (Asia/Jerusalem).`,
     "",
     "Find ONE emerging product trend and return the JSON below (no prose, no markdown fence).",
+    maxPriceIls
+      ? `\nBUDGET: the final product must sell for at most ₪${maxPriceIls} (≈ $${maxPriceUsdApprox ?? "?"} USD). Choose a trend whose typical product is well within this budget, and make searchQueries target affordable items.`
+      : "",
     "",
     "AVOID repeating these recently-published trends/products:",
     prevBlock,
@@ -127,6 +139,7 @@ export function productPickSystemPrompt(): string {
 export function productPickUserPrompt(
   trend: { title: string; description: string; category: string },
   candidates: AeSearchItem[],
+  maxPriceUsdApprox?: number | null,
 ): string {
   const list = candidates
     .map(
@@ -137,12 +150,17 @@ export function productPickUserPrompt(
   return [
     `TREND: ${trend.title} (${trend.category})`,
     trend.description,
+    maxPriceUsdApprox
+      ? `\nBUDGET: pick a product priced at most ~$${maxPriceUsdApprox} USD. If every candidate is over budget, return chosenProductId = null.`
+      : "",
     "",
     "REAL AliExpress candidates:",
     list,
     "",
     "Choose the best `chosenProductId` (must be one of the ids above) or null.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function scoringSystemPrompt(): string {

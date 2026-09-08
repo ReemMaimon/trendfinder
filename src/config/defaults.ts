@@ -33,6 +33,10 @@ export const settingsSchema = z.object({
   minOverallScore: z.number().int().min(0).max(100),
   maxSaturationScore: z.number().int().min(0).max(100),
   fallbackLookbackDays: z.number().int().min(0).max(3),
+  // Max displayed product price in ILS. null => no limit. The pipeline passes
+  // this budget to the AI and hard-rejects any product above it after currency
+  // conversion.
+  maxProductPriceIls: z.number().positive().max(100000).nullable(),
   scoringWeights: scoringWeightsSchema,
   diversityRules: diversityRulesSchema,
   // runtime override of APP_MODE; null => use env value
@@ -44,7 +48,7 @@ export type ScoringWeights = z.infer<typeof scoringWeightsSchema>;
 export type DiversityRules = z.infer<typeof diversityRulesSchema>;
 
 export const DEFAULT_SETTINGS: Settings = {
-  promptVersion: "2026-09-07.1",
+  promptVersion: "2026-09-08.1",
   researchInstructions: [
     "מטרת המחקר: לזהות טרנדים של מוצרים שנמצאים בתחילת עלייה — יש סימנים מוקדמים לעניין גובר, אך הם עדיין לא רוויים לחלוטין.",
     "עבוד לפי הכלל: קודם טרנד, אחר כך מוצר. אל תחפש מוצרים אקראיים ב-AliExpress ואז תכריז עליהם כטרנדיים.",
@@ -65,6 +69,7 @@ export const DEFAULT_SETTINGS: Settings = {
   minOverallScore: 55,
   maxSaturationScore: 80,
   fallbackLookbackDays: 3,
+  maxProductPriceIls: null,
   scoringWeights: {
     viralPotential: 1.3,
     affiliatePotential: 1.0,
