@@ -72,14 +72,13 @@ async function fetchRate(from: string, to: string): Promise<Rate> {
     }
   }
 
-  // fixed fallback (assumes USD->ILS unless from already == display base)
-  const fixed = env.CURRENCY_FIXED_USD_ILS;
-  const value: Rate = {
-    from,
-    to,
-    rate: from === "USD" && to === "ILS" ? fixed : 1,
-    asOf: new Date(),
-  };
+  // Fixed fallback. CURRENCY_FIXED_USD_ILS is "1 USD = X ILS"; derive the other
+  // directions from it (USD<->ILS both ways; anything else falls back to 1:1).
+  const usdIls = env.CURRENCY_FIXED_USD_ILS;
+  let rate = 1;
+  if (from === "USD" && to === "ILS") rate = usdIls;
+  else if (from === "ILS" && to === "USD") rate = 1 / usdIls;
+  const value: Rate = { from, to, rate, asOf: new Date() };
   rateCache = { key, value, at: Date.now() };
   return value;
 }

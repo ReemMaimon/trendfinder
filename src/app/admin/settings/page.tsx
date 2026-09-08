@@ -70,10 +70,10 @@ export default function SettingsPage() {
 
       <Card title="פרמטרים של הפייפליין">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <label className="text-sm">מקס' מועמדים<input type="number" className={input} value={draft.maxCandidates} onChange={(e) => setTop("maxCandidates", Number(e.target.value))} /></label>
-          <label className="text-sm">ציון כולל מינ'<input type="number" className={input} value={draft.minOverallScore} onChange={(e) => setTop("minOverallScore", Number(e.target.value))} /></label>
-          <label className="text-sm">רוויה מקס'<input type="number" className={input} value={draft.maxSaturationScore} onChange={(e) => setTop("maxSaturationScore", Number(e.target.value))} /></label>
-          <label className="text-sm">ימי fallback (0-3)<input type="number" className={input} value={draft.fallbackLookbackDays} onChange={(e) => setTop("fallbackLookbackDays", Number(e.target.value))} /></label>
+          <label className="text-sm">מקס' ניסיונות מחקר (לא מספר מוצרים! מומלץ 12-20)<input type="number" min={3} className={input} value={draft.maxCandidates} onChange={(e) => setTop("maxCandidates", Number(e.target.value))} /></label>
+          <label className="text-sm">ציון כולל מינ' (0-100)<input type="number" className={input} value={draft.minOverallScore} onChange={(e) => setTop("minOverallScore", Number(e.target.value))} /></label>
+          <label className="text-sm">רוויה מקס' (0-100)<input type="number" className={input} value={draft.maxSaturationScore} onChange={(e) => setTop("maxSaturationScore", Number(e.target.value))} /></label>
+          <label className="text-sm">ימי fallback (0-3, 0 = בלי מוצרים חוזרים)<input type="number" className={input} value={draft.fallbackLookbackDays} onChange={(e) => setTop("fallbackLookbackDays", Number(e.target.value))} /></label>
           <label className="text-sm">
             מחיר מקסימלי למוצר (₪)
             <input
