@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { env } from "@/lib/env";
+import { WelcomeModal } from "@/components/WelcomeModal";
 
 const siteName = "TrendFinder — המוצרים החמים של היום";
 const description =
@@ -11,6 +12,7 @@ export const metadata: Metadata = {
   title: { default: siteName, template: "%s · TrendFinder" },
   description,
   applicationName: "TrendFinder",
+  icons: { icon: "/logo.svg", apple: "/logo.svg" },
   openGraph: {
     type: "website",
     locale: "he_IL",
@@ -18,8 +20,9 @@ export const metadata: Metadata = {
     title: siteName,
     description,
     url: env.SITE_URL,
+    images: [{ url: "/logo.svg", alt: "TrendFinder" }],
   },
-  twitter: { card: "summary_large_image", title: siteName, description },
+  twitter: { card: "summary_large_image", title: siteName, description, images: ["/logo.svg"] },
   robots: { index: true, follow: true },
   alternates: { canonical: env.SITE_URL },
 };
@@ -34,7 +37,10 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="he" dir="rtl">
-      <body>{children}</body>
+      <body>
+        <WelcomeModal />
+        {children}
+      </body>
     </html>
   );
 }

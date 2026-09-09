@@ -4,9 +4,14 @@ import { prisma } from "@/lib/db";
 
 /**
  * Converts AliExpress listing prices to the display currency (ILS by default).
- * Uses the free Frankfurter API (ECB rates, no key). Falls back to a configured
- * fixed rate if the network call fails. Never fabricates a price — if the input
- * price is null, the output is null.
+ *
+ * Live rate providers (CURRENCY_PROVIDER):
+ *   erapi       - open.er-api.com  (free, no key, supports ILS, daily market rate)  [default]
+ *   frankfurter - ECB reference rates (NO ILS support -> falls back to fixed)
+ *   fixed       - always CURRENCY_FIXED_USD_ILS
+ *
+ * A configured fixed rate is always the last-resort fallback if the network
+ * call fails. Never fabricates a price — a null input price yields a null output.
  */
 
 interface Rate {
@@ -16,34 +21,63 @@ interface Rate {
   asOf: Date;
 }
 
-let rateCache: { key: string; value: Rate; at: number } | null = null;
-const TTL_MS = 6 * 60 * 60 * 1000; // 6h
+const rateCache = new Map<string, { value: Rate; at: number }>();
+const TTL_MS = 3 * 60 * 60 * 1000; // 3h — providers refresh ~daily anyway
+
+async function fetchFromErApi(from: string, to: string): Promise<Rate> {
+  const res = await fetch(`https://open.er-api.com/v6/latest/${encodeURIComponent(from)}`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`er-api ${res.status}`);
+  const json = (await res.json()) as {
+    result: string;
+    rates: Record<string, number>;
+    time_last_update_utc?: string;
+  };
+  if (json.result !== "success") throw new Error(`er-api result=${json.result}`);
+  const rate = json.rates?.[to];
+  if (!rate || !isFinite(rate)) throw new Error(`er-api: no rate for ${to}`);
+  return { from, to, rate, asOf: json.time_last_update_utc ? new Date(json.time_last_update_utc) : new Date() };
+}
+
+async function fetchFromFrankfurter(from: string, to: string): Promise<Rate> {
+  const res = await fetch(
+    `https://api.frankfurter.app/latest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    { signal: AbortSignal.timeout(8000) },
+  );
+  if (!res.ok) throw new Error(`frankfurter ${res.status}`);
+  const json = (await res.json()) as { rates: Record<string, number>; date: string };
+  const rate = json.rates?.[to];
+  if (!rate) throw new Error("frankfurter: rate missing (ILS is not supported by ECB)");
+  return { from, to, rate, asOf: new Date(json.date) };
+}
+
+function fixedRate(from: string, to: string): Rate {
+  // CURRENCY_FIXED_USD_ILS is "1 USD = X ILS"; derive the inverse.
+  const usdIls = env.CURRENCY_FIXED_USD_ILS;
+  let rate = 1;
+  if (from === "USD" && to === "ILS") rate = usdIls;
+  else if (from === "ILS" && to === "USD") rate = 1 / usdIls;
+  return { from, to, rate, asOf: new Date() };
+}
 
 async function fetchRate(from: string, to: string): Promise<Rate> {
+  from = from.toUpperCase();
+  to = to.toUpperCase();
+  if (from === to) return { from, to, rate: 1, asOf: new Date() };
+
   const key = `${from}->${to}`;
-  if (rateCache && rateCache.key === key && Date.now() - rateCache.at < TTL_MS) {
-    return rateCache.value;
-  }
+  const cached = rateCache.get(key);
+  if (cached && Date.now() - cached.at < TTL_MS) return cached.value;
 
-  if (from === to) {
-    const r = { from, to, rate: 1, asOf: new Date() };
-    rateCache = { key, value: r, at: Date.now() };
-    return r;
-  }
-
-  if (env.CURRENCY_PROVIDER === "frankfurter") {
-    const started = Date.now();
+  const started = Date.now();
+  if (env.CURRENCY_PROVIDER !== "fixed") {
     try {
-      const res = await fetch(
-        `https://api.frankfurter.app/latest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-        { signal: AbortSignal.timeout(8000) },
-      );
-      if (!res.ok) throw new Error(`frankfurter ${res.status}`);
-      const json = (await res.json()) as { rates: Record<string, number>; date: string };
-      const rate = json.rates?.[to];
-      if (!rate) throw new Error("rate missing in response");
-      const value: Rate = { from, to, rate, asOf: new Date(json.date) };
-      rateCache = { key, value, at: Date.now() };
+      const value =
+        env.CURRENCY_PROVIDER === "erapi"
+          ? await fetchFromErApi(from, to)
+          : await fetchFromFrankfurter(from, to);
+      rateCache.set(key, { value, at: Date.now() });
       await prisma.apiLog
         .create({
           data: {
@@ -51,13 +85,13 @@ async function fetchRate(from: string, to: string): Promise<Rate> {
             operation: `rate ${key}`,
             ok: true,
             durationMs: Date.now() - started,
-            meta: { rate, asOf: json.date },
+            meta: { rate: value.rate, asOf: value.asOf.toISOString(), source: env.CURRENCY_PROVIDER },
           },
         })
         .catch(() => {});
       return value;
     } catch (err) {
-      logger.warn({ err, from, to }, "currency provider failed, using fixed fallback");
+      logger.warn({ err, from, to }, "live currency provider failed, using fixed fallback");
       await prisma.apiLog
         .create({
           data: {
@@ -72,14 +106,9 @@ async function fetchRate(from: string, to: string): Promise<Rate> {
     }
   }
 
-  // Fixed fallback. CURRENCY_FIXED_USD_ILS is "1 USD = X ILS"; derive the other
-  // directions from it (USD<->ILS both ways; anything else falls back to 1:1).
-  const usdIls = env.CURRENCY_FIXED_USD_ILS;
-  let rate = 1;
-  if (from === "USD" && to === "ILS") rate = usdIls;
-  else if (from === "ILS" && to === "USD") rate = 1 / usdIls;
-  const value: Rate = { from, to, rate, asOf: new Date() };
-  rateCache = { key, value, at: Date.now() };
+  const value = fixedRate(from, to);
+  // cache the fallback briefly so we don't hammer a failing provider
+  rateCache.set(key, { value, at: Date.now() - TTL_MS + 5 * 60 * 1000 });
   return value;
 }
 

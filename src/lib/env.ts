@@ -31,7 +31,10 @@ const rawSchema = z.object({
 
   CURRENCY_BASE: z.string().default("USD"),
   CURRENCY_DISPLAY: z.string().default("ILS"),
-  CURRENCY_PROVIDER: z.enum(["frankfurter", "fixed"]).default("frankfurter"),
+  // erapi = open.er-api.com (free, no key, supports ILS, daily market rate)
+  // frankfurter = ECB rates (NO ILS support — will fall back to fixed)
+  // fixed = always use CURRENCY_FIXED_USD_ILS
+  CURRENCY_PROVIDER: z.enum(["erapi", "frankfurter", "fixed"]).default("erapi"),
   CURRENCY_FIXED_USD_ILS: z.coerce.number().positive().default(3.7),
 
   ALIEXPRESS_AFFILIATE_ID: z.string().optional(),

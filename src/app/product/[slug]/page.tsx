@@ -5,6 +5,7 @@ import { PublicService } from "@/services/public/PublicService";
 import { ImageGallery } from "@/components/ImageGallery";
 import { TrendReport } from "@/components/TrendReport";
 import { BuyButton } from "@/components/BuyButton";
+import { BrandLogo } from "@/components/BrandLogo";
 import { TrackView } from "@/components/Analytics";
 import { env } from "@/lib/env";
 
@@ -71,9 +72,14 @@ export default async function ProductPage({ params }: { params: { slug: string }
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
 
-      <Link href="/" className="mb-4 inline-flex items-center gap-1 text-sm font-bold text-brand-700">
-        → חזרה למוצרים של היום
-      </Link>
+      <div className="mb-4 flex items-center justify-between">
+        <Link href="/" className="inline-flex items-center gap-1 text-sm font-bold text-brand-700">
+          → חזרה למוצרים של היום
+        </Link>
+        <Link href="/" aria-label="TrendFinder">
+          <BrandLogo variant="compact" />
+        </Link>
+      </div>
 
       <div className="space-y-4">
         <ImageGallery images={product.images} alt={product.title} />

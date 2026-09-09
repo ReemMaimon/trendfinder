@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { PublicService } from "@/services/public/PublicService";
 import { ProductCard } from "@/components/ProductCard";
-import { jerusalemDateTime } from "@/lib/time";
+import { BrandLogo } from "@/components/BrandLogo";
 import { env } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,9 @@ export default async function HomePage() {
   return (
     <main className="container-mobile py-6">
       <header className="mb-6 text-center">
-        <div className="mb-1 text-sm font-bold text-brand-600">TrendFinder</div>
+        <div className="mb-3 flex justify-center">
+          <BrandLogo variant="hero" />
+        </div>
         <h1 className="text-2xl font-extrabold leading-tight text-ink">
           🔥 המוצרים החמים של היום
         </h1>
