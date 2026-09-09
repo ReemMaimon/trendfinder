@@ -1,0 +1,9 @@
+# Keep LF endings so shell scripts run on the Linux VPS regardless of the
+# machine they were committed from.
+* text=auto eol=lf
+*.sh text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
