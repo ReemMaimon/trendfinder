@@ -14,7 +14,8 @@ import { getAIProvider, extractJson } from "@/services/openai/OpenAIService";
 import { hebrewCopySchema } from "@/services/types";
 import { hebrewExplanationPrompt, type PreviousProductContext } from "@/config/prompts";
 import { normalizeCategory } from "@/config/categories";
-import type { RunTrigger } from "@prisma/client";
+import type { RunTrigger, Product as PrismaProduct } from "@prisma/client";
+import type { Settings } from "@/config/defaults";
 import { env } from "@/lib/env";
 
 const ADVISORY_LOCK_KEY = 918273645; // arbitrary constant for generation lock
@@ -161,6 +162,32 @@ export const DailyGenerationService = {
     }
     return locked;
   },
+
+  /**
+   * Replace ONE product in an existing daily set with a freshly AI-discovered
+   * product (not a reused past product). The other two products stay put and
+   * are used as the diversity baseline, so the replacement is meaningfully
+   * different from them and from recent history.
+   */
+  async regenerateSlot(params: {
+    targetDate: string;
+    position: number; // 1..3
+    trigger?: RunTrigger;
+    onProgress?: ProgressFn;
+  }): Promise<{ ok: boolean; runId: string; productId?: string; message: string }> {
+    const emit = (step: string, detail?: string) => {
+      const e = { step, detail, at: new Date().toISOString() };
+      logger.info({ step, detail }, "slot regeneration");
+      params.onProgress?.(e);
+    };
+    const locked = await withAdvisoryLock(() =>
+      runSlotRegeneration(params.targetDate, params.position, params.trigger ?? "MANUAL", emit),
+    );
+    if (locked === null) {
+      return { ok: false, runId: "", message: "Another generation run is already in progress." };
+    }
+    return locked;
+  },
 };
 
 async function runPipeline(
@@ -235,267 +262,26 @@ async function runPipeline(
         attempt++;
         candidateOrder++;
         emit("research", `attempt ${attempt}/${settings.maxCandidates}`);
-
-        // ---- 1. AI: discover the emerging trend + AliExpress search phrases
-        const attemptRes = await TrendResearchService.researchTrend({
+        const res = await evaluateOneAttempt({
+          run,
           settings,
           targetDate,
           previous,
+          history,
+          acceptedDiversity,
           avoidTrendTitles,
-          alreadyAcceptedCategories: acceptedDiversity.map((d) => normalizeCategory(d.category)),
           maxPriceIls,
-          maxPriceUsdApprox: maxPriceUsd,
-          runId: run.id,
-        });
-
-        if (attemptRes.parseError || !attemptRes.research) {
-          await prisma.generationCandidate.create({
-            data: {
-              runId: run.id,
-              order: candidateOrder,
-              trendTitle: "(unparseable AI response)",
-              trendDescription: attemptRes.parseError ?? "no research returned",
-              status: "REJECTED_OTHER",
-              rejectionReason: attemptRes.parseError ?? "AI returned nothing usable",
-              rawResearch: { rawText: attemptRes.rawText.slice(0, 4000) },
-            },
-          });
-          errorLog.push({ step: "research", message: attemptRes.parseError ?? "no research", at: new Date().toISOString() });
-          continue;
-        }
-
-        const r = attemptRes.research;
-        const category = normalizeCategory(r.trend.category);
-        avoidTrendTitles.push(r.trend.title);
-        searchedTopics.push(...r.searchQueries, r.trend.title);
-
-        await persistSources(run.id, null, [
-          ...r.sources,
-          ...attemptRes.webSources.map((s) => ({
-            url: s.url,
-            title: s.title ?? null,
-            sourceType: "web" as const,
-            supports: "trend" as const,
-            relevance: "surfaced by web_search",
-          })),
-        ]);
-
-        const baseCandidateData: Record<string, unknown> = {
-          runId: run.id,
+          maxPriceUsd,
           order: candidateOrder,
-          trendTitle: r.trend.title,
-          trendDescription: r.trend.description,
-          category,
-          socialSignals: r.socialSignals as any,
-          rawResearch: { research: r, searchQueries: r.searchQueries } as any,
-        };
-
-        // ---- 2. REAL AliExpress search (code, not the LLM)
-        emit("aliexpress", `searching AliExpress: ${r.searchQueries.slice(0, 3).join(" / ")}`);
-        const excludeIds = new Set<string>([
-          ...(history.map((h) => h.aeProductId).filter(Boolean) as string[]),
-          ...(acceptedDiversity.map((d) => d.aeProductId).filter(Boolean) as string[]),
-        ]);
-        const { searches, candidates } = await AliExpressResearchService.gatherCandidates(
-          r.searchQueries,
-          { excludeProductIds: excludeIds, maxPriceUsd: maxPriceUsd ?? undefined },
-        );
-        (baseCandidateData.rawResearch as any).aeSearches = searches.map((s) => ({
-          query: s.query,
-          count: s.results.length,
-        }));
-
-        if (candidates.length === 0) {
-          await prisma.generationCandidate.create({
-            data: {
-              ...(baseCandidateData as any),
-              status: "REJECTED_NO_PRODUCT",
-              rejectionReason: `AliExpress search returned no usable products for: ${r.searchQueries.join(", ")}`,
-            },
-          });
-          emit("reject", `no AliExpress products for "${r.trend.title}"`);
-          continue;
-        }
-
-        // ---- 3. AI: pick the best REAL product for the trend
-        const pick = await TrendResearchService.pickProduct({
-          trend: r.trend,
-          candidates,
-          maxPriceUsdApprox: maxPriceUsd,
-          runId: run.id,
+          slotLabel: `${acceptedProductIds.length + 1}/3`,
+          emit,
+          searchedTopics,
+          errorLog,
         });
-        const chosen = pick.chosenProductId
-          ? candidates.find((c) => c.productId === pick.chosenProductId)
-          : null;
-        if (!chosen) {
-          await prisma.generationCandidate.create({
-            data: {
-              ...(baseCandidateData as any),
-              status: "REJECTED_NO_PRODUCT",
-              rejectionReason: pick.rejectionReason ?? "no candidate matched the trend well enough",
-            },
-          });
-          emit("reject", `no matching product for "${r.trend.title}"`);
-          continue;
+        if (res) {
+          acceptedProductIds.push(res.product.id);
+          acceptedDiversity.push(res.divItem);
         }
-
-        const rp = AliExpressResearchService.toRealProduct(chosen);
-        Object.assign(baseCandidateData, {
-          aeUrl: rp.aeUrl,
-          aeProductId: rp.aeProductId,
-          aeTitle: rp.aeTitle,
-          aeImages: rp.aeImages as any,
-          aeRating: rp.aeRating,
-          aeOrders: rp.aeOrders,
-          priceOriginal: rp.priceOriginal,
-          currencyOriginal: rp.currencyOriginal,
-        });
-
-        const quality = AliExpressResearchService.qualityCheck(rp);
-        if (!quality.ok) {
-          await prisma.generationCandidate.create({
-            data: { ...(baseCandidateData as any), status: "REJECTED_DATA_QUALITY", rejectionReason: quality.reason },
-          });
-          emit("reject", `data quality: ${quality.reason}`);
-          continue;
-        }
-
-        // ---- price budget (hard gate on the converted ILS price)
-        const fx = await CurrencyService.toDisplay({
-          priceOriginal: rp.priceOriginal,
-          currencyOriginal: rp.currencyOriginal,
-          priceShipping: null,
-          shippingVerified: false,
-        });
-        if (maxPriceIls && fx.priceIls != null && fx.priceIls > maxPriceIls) {
-          await prisma.generationCandidate.create({
-            data: {
-              ...(baseCandidateData as any),
-              status: "REJECTED_OTHER",
-              rejectionReason: `over budget: ₪${fx.priceIls} > max ₪${maxPriceIls}`,
-            },
-          });
-          emit("reject", `over budget (₪${fx.priceIls} > ₪${maxPriceIls})`);
-          continue;
-        }
-
-        if (pick.relevance < 45) {
-          await prisma.generationCandidate.create({
-            data: {
-              ...(baseCandidateData as any),
-              status: "REJECTED_OTHER",
-              rejectionReason: `product relevance ${pick.relevance} too low — ${pick.reasoning}`,
-            },
-          });
-          emit("reject", `low relevance (${pick.relevance})`);
-          continue;
-        }
-
-        // ---- 4. scoring
-        emit("scoring", `scoring "${r.trend.title}"`);
-        const scored = await ProductScoringService.score(
-          { trend: r.trend, product: rp, socialSignals: r.socialSignals, selfAssessment: r.selfAssessment },
-          settings.scoringWeights,
-          run.id,
-        );
-
-        if (scored.saturationScore > settings.maxSaturationScore) {
-          await prisma.generationCandidate.create({
-            data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_SATURATED", rejectionReason: `saturation ${scored.saturationScore} > max ${settings.maxSaturationScore}` },
-          });
-          emit("reject", `saturated (${scored.saturationScore})`);
-          continue;
-        }
-        if (scored.overallScore < settings.minOverallScore) {
-          await prisma.generationCandidate.create({
-            data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_LOW_SCORE", rejectionReason: `overall ${scored.overallScore} < min ${settings.minOverallScore}` },
-          });
-          emit("reject", `low score (${scored.overallScore})`);
-          continue;
-        }
-
-        // ---- 5. diversity + duplicate
-        const divItem: DiversityItem = {
-          title: rp.aeTitle,
-          trendTitle: r.trend.title,
-          trendDescription: r.trend.description,
-          category,
-          aeProductId: rp.aeProductId,
-        };
-        const div = DiversityService.evaluate(divItem, acceptedDiversity, history, settings.diversityRules);
-        if (!div.ok) {
-          await prisma.generationCandidate.create({
-            data: { ...(baseCandidateData as any), scores: scored as any, status: div.status, rejectionReason: div.reason },
-          });
-          emit("reject", div.reason);
-          continue;
-        }
-
-        // ---- 6. ACCEPT
-        emit("accept", `"${r.trend.title}" -> ${rp.aeTitle} (${acceptedProductIds.length + 1}/3)`);
-        const copy = await hebrewCopyFor(r, rp, scored, run.id);
-
-        const product = await prisma.product.create({
-          data: {
-            trendTitle: r.trend.title,
-            trendDescription: r.trend.description,
-            category,
-            slug: makeSlug(r.trend.title, `${targetDate}-${run.id}-${candidateOrder}`),
-            aeTitle: rp.aeTitle,
-            aeDescription: null,
-            aeUrl: rp.aeUrl,
-            aeProductId: rp.aeProductId,
-            aeStoreName: rp.aeStoreName,
-            aeImages: rp.aeImages as any,
-            aeRating: rp.aeRating,
-            aeOrders: rp.aeOrders,
-            aeVariants: undefined,
-            priceOriginal: rp.priceOriginal,
-            currencyOriginal: rp.currencyOriginal,
-            priceShipping: null,
-            shippingVerified: false,
-            priceIls: fx.priceIls,
-            priceIlsTotal: fx.priceIlsTotal,
-            fxRateUsed: fx.fxRateUsed,
-            fxAsOf: fx.fxAsOf,
-            dataConfidence: {
-              ...rp.dataConfidence,
-              pickRelevance: pick.relevance,
-              pickReasoning: pick.reasoning,
-            } as any,
-            viralPotentialScore: scored.viralPotentialScore,
-            affiliatePotentialScore: scored.affiliatePotentialScore,
-            noveltyScore: scored.noveltyScore,
-            trendMomentumScore: scored.trendMomentumScore,
-            saturationScore: scored.saturationScore,
-            overallScore: scored.overallScore,
-            explanationHe: copy.explanationHe,
-            generationRunId: run.id,
-            origin: "AI",
-            trendReport: {
-              create: {
-                tiktokLevel: r.socialSignals.tiktok.level,
-                tiktokReasoning: r.socialSignals.tiktok.reasoning,
-                instagramLevel: r.socialSignals.instagram.level,
-                instagramReasoning: r.socialSignals.instagram.reasoning,
-                youtubeLevel: r.socialSignals.youtube.level,
-                youtubeReasoning: r.socialSignals.youtube.reasoning,
-                googleTrendsLevel: r.socialSignals.googleTrends.level,
-                googleTrendsReasoning: r.socialSignals.googleTrends.reasoning,
-                verifiedMetrics: (r.socialSignals.verifiedMetrics ?? undefined) as any,
-                overallReasoningHe: copy.overallReasoningHe,
-              },
-            },
-          },
-        });
-
-        await persistSources(run.id, product.id, r.sources);
-        await prisma.generationCandidate.create({
-          data: { ...(baseCandidateData as any), scores: scored as any, status: "ACCEPTED", productId: product.id },
-        });
-
-        acceptedProductIds.push(product.id);
-        acceptedDiversity.push(divItem);
       }
 
       // ---- fallback ------------------------------------------------------
@@ -648,6 +434,424 @@ async function runPipeline(
         ? err
         : new GenerationError((err as Error).message, "pipeline", err);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared single-candidate evaluation (used by the full run and slot regen)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface AttemptCtx {
+  run: { id: string };
+  settings: Settings;
+  targetDate: string;
+  previous: PreviousProductContext[];
+  history: DiversityItem[];
+  acceptedDiversity: DiversityItem[];
+  avoidTrendTitles: string[];
+  maxPriceIls: number | null;
+  maxPriceUsd: number | null;
+  order: number;
+  slotLabel: string;
+  emit: (step: string, detail?: string) => void;
+  searchedTopics: string[];
+  errorLog: { step: string; message: string; at: string }[];
+}
+
+async function evaluateOneAttempt(
+  ctx: AttemptCtx,
+): Promise<{ product: PrismaProduct; divItem: DiversityItem } | null> {
+  const { run, settings, targetDate, previous, history, acceptedDiversity, maxPriceIls, maxPriceUsd, emit } = ctx;
+  const order = ctx.order;
+
+  const attemptRes = await TrendResearchService.researchTrend({
+    settings,
+    targetDate,
+    previous,
+    avoidTrendTitles: ctx.avoidTrendTitles,
+    alreadyAcceptedCategories: acceptedDiversity.map((d) => normalizeCategory(d.category)),
+    maxPriceIls,
+    maxPriceUsdApprox: maxPriceUsd,
+    runId: run.id,
+  });
+
+  if (attemptRes.parseError || !attemptRes.research) {
+    await prisma.generationCandidate.create({
+      data: {
+        runId: run.id,
+        order,
+        trendTitle: "(unparseable AI response)",
+        trendDescription: attemptRes.parseError ?? "no research returned",
+        status: "REJECTED_OTHER",
+        rejectionReason: attemptRes.parseError ?? "AI returned nothing usable",
+        rawResearch: { rawText: attemptRes.rawText.slice(0, 4000) },
+      },
+    });
+    ctx.errorLog.push({ step: "research", message: attemptRes.parseError ?? "no research", at: new Date().toISOString() });
+    return null;
+  }
+
+  const r = attemptRes.research;
+  const category = normalizeCategory(r.trend.category);
+  ctx.avoidTrendTitles.push(r.trend.title);
+  ctx.searchedTopics.push(...r.searchQueries, r.trend.title);
+
+  await persistSources(run.id, null, [
+    ...r.sources,
+    ...attemptRes.webSources.map((s) => ({
+      url: s.url,
+      title: s.title ?? null,
+      sourceType: "web" as const,
+      supports: "trend" as const,
+      relevance: "surfaced by web_search",
+    })),
+  ]);
+
+  const baseCandidateData: Record<string, unknown> = {
+    runId: run.id,
+    order,
+    trendTitle: r.trend.title,
+    trendDescription: r.trend.description,
+    category,
+    socialSignals: r.socialSignals as any,
+    rawResearch: { research: r, searchQueries: r.searchQueries } as any,
+  };
+
+  emit("aliexpress", `searching AliExpress: ${r.searchQueries.slice(0, 3).join(" / ")}`);
+  const excludeIds = new Set<string>([
+    ...(history.map((h) => h.aeProductId).filter(Boolean) as string[]),
+    ...(acceptedDiversity.map((d) => d.aeProductId).filter(Boolean) as string[]),
+  ]);
+  const { searches, candidates } = await AliExpressResearchService.gatherCandidates(r.searchQueries, {
+    excludeProductIds: excludeIds,
+    maxPriceUsd: maxPriceUsd ?? undefined,
+  });
+  (baseCandidateData.rawResearch as any).aeSearches = searches.map((s) => ({ query: s.query, count: s.results.length }));
+
+  if (candidates.length === 0) {
+    await prisma.generationCandidate.create({
+      data: {
+        ...(baseCandidateData as any),
+        status: "REJECTED_NO_PRODUCT",
+        rejectionReason: `AliExpress search returned no usable products for: ${r.searchQueries.join(", ")}`,
+      },
+    });
+    emit("reject", `no AliExpress products for "${r.trend.title}"`);
+    return null;
+  }
+
+  const pick = await TrendResearchService.pickProduct({
+    trend: r.trend,
+    candidates,
+    maxPriceUsdApprox: maxPriceUsd,
+    runId: run.id,
+  });
+  const chosen = pick.chosenProductId ? candidates.find((c) => c.productId === pick.chosenProductId) : null;
+  if (!chosen) {
+    await prisma.generationCandidate.create({
+      data: {
+        ...(baseCandidateData as any),
+        status: "REJECTED_NO_PRODUCT",
+        rejectionReason: pick.rejectionReason ?? "no candidate matched the trend well enough",
+      },
+    });
+    emit("reject", `no matching product for "${r.trend.title}"`);
+    return null;
+  }
+
+  const rp = AliExpressResearchService.toRealProduct(chosen);
+  Object.assign(baseCandidateData, {
+    aeUrl: rp.aeUrl,
+    aeProductId: rp.aeProductId,
+    aeTitle: rp.aeTitle,
+    aeImages: rp.aeImages as any,
+    aeRating: rp.aeRating,
+    aeOrders: rp.aeOrders,
+    priceOriginal: rp.priceOriginal,
+    currencyOriginal: rp.currencyOriginal,
+  });
+
+  const quality = AliExpressResearchService.qualityCheck(rp);
+  if (!quality.ok) {
+    await prisma.generationCandidate.create({
+      data: { ...(baseCandidateData as any), status: "REJECTED_DATA_QUALITY", rejectionReason: quality.reason },
+    });
+    emit("reject", `data quality: ${quality.reason}`);
+    return null;
+  }
+
+  const fx = await CurrencyService.toDisplay({
+    priceOriginal: rp.priceOriginal,
+    currencyOriginal: rp.currencyOriginal,
+    priceShipping: null,
+    shippingVerified: false,
+  });
+  if (maxPriceIls && fx.priceIls != null && fx.priceIls > maxPriceIls) {
+    await prisma.generationCandidate.create({
+      data: {
+        ...(baseCandidateData as any),
+        status: "REJECTED_OTHER",
+        rejectionReason: `over budget: ₪${fx.priceIls} > max ₪${maxPriceIls}`,
+      },
+    });
+    emit("reject", `over budget (₪${fx.priceIls} > ₪${maxPriceIls})`);
+    return null;
+  }
+
+  if (pick.relevance < 45) {
+    await prisma.generationCandidate.create({
+      data: {
+        ...(baseCandidateData as any),
+        status: "REJECTED_OTHER",
+        rejectionReason: `product relevance ${pick.relevance} too low — ${pick.reasoning}`,
+      },
+    });
+    emit("reject", `low relevance (${pick.relevance})`);
+    return null;
+  }
+
+  emit("scoring", `scoring "${r.trend.title}"`);
+  const scored = await ProductScoringService.score(
+    { trend: r.trend, product: rp, socialSignals: r.socialSignals, selfAssessment: r.selfAssessment },
+    settings.scoringWeights,
+    run.id,
+  );
+
+  if (scored.saturationScore > settings.maxSaturationScore) {
+    await prisma.generationCandidate.create({
+      data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_SATURATED", rejectionReason: `saturation ${scored.saturationScore} > max ${settings.maxSaturationScore}` },
+    });
+    emit("reject", `saturated (${scored.saturationScore})`);
+    return null;
+  }
+  if (scored.overallScore < settings.minOverallScore) {
+    await prisma.generationCandidate.create({
+      data: { ...(baseCandidateData as any), scores: scored as any, status: "REJECTED_LOW_SCORE", rejectionReason: `overall ${scored.overallScore} < min ${settings.minOverallScore}` },
+    });
+    emit("reject", `low score (${scored.overallScore})`);
+    return null;
+  }
+
+  const divItem: DiversityItem = {
+    title: rp.aeTitle,
+    trendTitle: r.trend.title,
+    trendDescription: r.trend.description,
+    category,
+    aeProductId: rp.aeProductId,
+  };
+  const div = DiversityService.evaluate(divItem, acceptedDiversity, history, settings.diversityRules);
+  if (!div.ok) {
+    await prisma.generationCandidate.create({
+      data: { ...(baseCandidateData as any), scores: scored as any, status: div.status, rejectionReason: div.reason },
+    });
+    emit("reject", div.reason);
+    return null;
+  }
+
+  emit("accept", `"${r.trend.title}" -> ${rp.aeTitle} (${ctx.slotLabel})`);
+  const copy = await hebrewCopyFor(r, rp, scored, run.id);
+
+  const product = await prisma.product.create({
+    data: {
+      trendTitle: r.trend.title,
+      trendDescription: r.trend.description,
+      category,
+      slug: makeSlug(r.trend.title, `${targetDate}-${run.id}-${order}`),
+      aeTitle: rp.aeTitle,
+      aeDescription: null,
+      aeUrl: rp.aeUrl,
+      aeProductId: rp.aeProductId,
+      aeStoreName: rp.aeStoreName,
+      aeImages: rp.aeImages as any,
+      aeRating: rp.aeRating,
+      aeOrders: rp.aeOrders,
+      aeVariants: undefined,
+      priceOriginal: rp.priceOriginal,
+      currencyOriginal: rp.currencyOriginal,
+      priceShipping: null,
+      shippingVerified: false,
+      priceIls: fx.priceIls,
+      priceIlsTotal: fx.priceIlsTotal,
+      fxRateUsed: fx.fxRateUsed,
+      fxAsOf: fx.fxAsOf,
+      dataConfidence: { ...rp.dataConfidence, pickRelevance: pick.relevance, pickReasoning: pick.reasoning } as any,
+      viralPotentialScore: scored.viralPotentialScore,
+      affiliatePotentialScore: scored.affiliatePotentialScore,
+      noveltyScore: scored.noveltyScore,
+      trendMomentumScore: scored.trendMomentumScore,
+      saturationScore: scored.saturationScore,
+      overallScore: scored.overallScore,
+      explanationHe: copy.explanationHe,
+      generationRunId: run.id,
+      origin: "AI",
+      trendReport: {
+        create: {
+          tiktokLevel: r.socialSignals.tiktok.level,
+          tiktokReasoning: r.socialSignals.tiktok.reasoning,
+          instagramLevel: r.socialSignals.instagram.level,
+          instagramReasoning: r.socialSignals.instagram.reasoning,
+          youtubeLevel: r.socialSignals.youtube.level,
+          youtubeReasoning: r.socialSignals.youtube.reasoning,
+          googleTrendsLevel: r.socialSignals.googleTrends.level,
+          googleTrendsReasoning: r.socialSignals.googleTrends.reasoning,
+          verifiedMetrics: (r.socialSignals.verifiedMetrics ?? undefined) as any,
+          overallReasoningHe: copy.overallReasoningHe,
+        },
+      },
+    },
+  });
+
+  await persistSources(run.id, product.id, r.sources);
+  await prisma.generationCandidate.create({
+    data: { ...(baseCandidateData as any), scores: scored as any, status: "ACCEPTED", productId: product.id },
+  });
+
+  return { product, divItem };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-slot AI regeneration
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runSlotRegeneration(
+  targetDate: string,
+  position: number,
+  trigger: RunTrigger,
+  emit: (step: string, detail?: string) => void,
+): Promise<{ ok: boolean; runId: string; productId?: string; message: string }> {
+  if (position < 1 || position > 3) {
+    return { ok: false, runId: "", message: "position must be 1, 2 or 3" };
+  }
+
+  const set = await prisma.dailyProductSet.findUnique({
+    where: { date: targetDate },
+    include: { items: { include: { product: true } } },
+  });
+  if (!set) return { ok: false, runId: "", message: `no daily set for ${targetDate}` };
+
+  const keptItems = set.items.filter((i) => i.position !== position);
+  const keptDiversity: DiversityItem[] = keptItems.map((i) => ({
+    title: i.product.aeTitle,
+    trendTitle: i.product.trendTitle,
+    trendDescription: i.product.trendDescription,
+    category: i.product.category,
+    aeProductId: i.product.aeProductId,
+  }));
+  const settings = await SettingsService.get(true);
+  const mode = await SettingsService.getAppMode();
+
+  const run = await prisma.generationRun.create({
+    data: {
+      targetDate,
+      trigger,
+      status: "RUNNING",
+      mode,
+      aiModel: env.AI_PROVIDER === "mock" ? "mock-1" : env.OPENAI_MODEL,
+      promptVersion: settings.promptVersion,
+      summary: `Single-slot regeneration for ${targetDate} position ${position}`,
+      searchedTopics: [],
+    },
+  });
+  emit("run-started", `slot ${position} regeneration for ${targetDate}`);
+
+  const errorLog: { step: string; message: string; at: string }[] = [];
+  const searchedTopics: string[] = [];
+  const avoidTrendTitles: string[] = [];
+
+  try {
+    // full history + the two products we're keeping, so the new one differs from both
+    const previous = await loadPreviousContext(targetDate, settings.diversityRules.historyLookbackDays);
+    const historyBase = await loadDiversityHistory(targetDate, settings.diversityRules.historyLookbackDays);
+    const history = [...historyBase, ...keptDiversity];
+    const acceptedDiversity = [...keptDiversity];
+
+    const maxPriceIls = settings.maxProductPriceIls;
+    const maxPriceUsd = maxPriceIls
+      ? await CurrencyService.convert(maxPriceIls, env.CURRENCY_DISPLAY, "USD")
+      : null;
+
+    let found: { product: PrismaProduct } | null = null;
+    const maxAttempts = Math.max(3, Math.ceil(settings.maxCandidates / 2));
+    for (let attempt = 1; attempt <= maxAttempts && !found; attempt++) {
+      emit("research", `attempt ${attempt}/${maxAttempts}`);
+      const res = await evaluateOneAttempt({
+        run,
+        settings,
+        targetDate,
+        previous,
+        history,
+        acceptedDiversity,
+        avoidTrendTitles,
+        maxPriceIls,
+        maxPriceUsd,
+        order: attempt,
+        slotLabel: `slot ${position}`,
+        emit,
+        searchedTopics,
+        errorLog,
+      });
+      if (res) found = res;
+    }
+
+    if (!found) {
+      await prisma.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: "FAILED",
+          finishedAt: new Date(),
+          durationMs: Date.now() - run.startedAt.getTime(),
+          errorLog: errorLog as any,
+          searchedTopics: Array.from(new Set(searchedTopics)).slice(0, 100),
+          summary: `Slot ${position}: could not find a suitable new product after ${maxAttempts} attempts. Existing product kept.`,
+        },
+      });
+      emit("done", "no replacement found — existing product kept");
+      return { ok: false, runId: run.id, message: "No suitable new product was found. The existing one was kept." };
+    }
+
+    // swap the new product into the slot (kept items are at other positions
+    // with other product ids, so they are untouched)
+    await prisma.$transaction([
+      prisma.dailyProductItem.deleteMany({ where: { setId: set.id, position } }),
+      prisma.dailyProductItem.deleteMany({ where: { setId: set.id, productId: found.product.id } }),
+      prisma.dailyProductItem.create({
+        data: { setId: set.id, productId: found.product.id, position, reused: false, reusedFromDate: null },
+      }),
+      prisma.dailyProductSet.update({ where: { id: set.id }, data: { generationRunId: run.id } }),
+    ]);
+
+    await prisma.generationRun.update({
+      where: { id: run.id },
+      data: {
+        status: "SUCCESS",
+        finishedAt: new Date(),
+        durationMs: Date.now() - run.startedAt.getTime(),
+        errorLog: errorLog as any,
+        searchedTopics: Array.from(new Set(searchedTopics)).slice(0, 100),
+        stats: { slot: position, accepted: 1 } as any,
+        summary: `Slot ${position} replaced with a new AI product: ${found.product.trendTitle}`,
+      },
+    });
+
+    emit("done", `slot ${position} -> ${found.product.trendTitle}`);
+    return {
+      ok: true,
+      runId: run.id,
+      productId: found.product.id,
+      message: `Position ${position} replaced with "${found.product.trendTitle}".`,
+    };
+  } catch (err) {
+    logger.error({ err, runId: run.id }, "slot regeneration crashed");
+    await prisma.generationRun.update({
+      where: { id: run.id },
+      data: {
+        status: "FAILED",
+        finishedAt: new Date(),
+        durationMs: Date.now() - run.startedAt.getTime(),
+        errorLog: [...errorLog, { step: "fatal", message: (err as Error).message, at: new Date().toISOString() }] as any,
+      },
+    });
+    return { ok: false, runId: run.id, message: (err as Error).message };
+  }
 }
 
 async function persistSources(

@@ -84,6 +84,7 @@ export default function AdminTodayPage() {
                   </div>
                   <div className="flex shrink-0 flex-col gap-1 text-sm">
                     <a href={`/admin/products/${it.product.id}`} className="text-brand-600">עריכה</a>
+                    <RegenerateControl date={date} position={it.position} onDone={reload} setMsg={setMsg} />
                     <button onClick={() => act({ action: "remove", position: it.position })} className="text-red-600">
                       הסרה
                     </button>
@@ -117,6 +118,41 @@ export default function AdminTodayPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+function RegenerateControl({
+  date,
+  position,
+  onDone,
+  setMsg,
+}: {
+  date: string;
+  position: number;
+  onDone: () => void;
+  setMsg: (m: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    if (!confirm(`להחליף את מוצר #${position} במוצר חדש שה-AI ימצא? (עד ~2 דקות)`)) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await apiSend(`/api/admin/sets/${date}/regenerate`, "POST", { position });
+      setMsg(res.message || "הוחלף בהצלחה");
+      onDone();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button onClick={run} disabled={busy} className="font-semibold text-brand-600 disabled:opacity-50">
+      {busy ? "ה-AI מחפש…" : "החלפה עם AI"}
+    </button>
   );
 }
 
