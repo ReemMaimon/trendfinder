@@ -6,6 +6,7 @@ import { ImageGallery } from "@/components/ImageGallery";
 import { TrendReport } from "@/components/TrendReport";
 import { BuyButton } from "@/components/BuyButton";
 import { BrandLogo } from "@/components/BrandLogo";
+import { SiteFooter } from "@/components/SiteFooter";
 import { TrackView } from "@/components/Analytics";
 import { env } from "@/lib/env";
 
@@ -154,11 +155,8 @@ export default async function ProductPage({ params }: { params: { slug: string }
           </section>
         )}
 
-        <p className="px-2 pb-8 pt-2 text-center text-xs leading-relaxed text-ink-muted">
-          המידע נאסף ממקורות ציבוריים ומ-AliExpress. שדות שלא ניתן היה לאמת מסומנים כ&quot;לא זמין&quot;
-          ואינם מומצאים. הרכישה, המשלוח והתשלום מתבצעים ישירות מול AliExpress.
-        </p>
       </div>
+      <SiteFooter />
     </main>
   );
 }

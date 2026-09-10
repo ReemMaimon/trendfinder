@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { PublicService } from "@/services/public/PublicService";
 import { ProductCard } from "@/components/ProductCard";
 import { BrandLogo } from "@/components/BrandLogo";
+import { SiteFooter } from "@/components/SiteFooter";
 import { env } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
@@ -49,17 +50,7 @@ export default async function HomePage() {
         </div>
       )}
 
-      <section className="mt-10 rounded-2xl bg-white/70 p-4 text-center text-xs leading-relaxed text-ink-muted">
-        <p>
-          המחירים מוצגים בשקלים (₪) ומבוססים על המרה משוערת ממחיר המקור ב-AliExpress.
-          ייתכנו הבדלים בפועל בדף המוצר. TrendFinder אינו מוכר מוצרים ואינו אחראי
-          למשלוח או לתשלום — הרכישה מתבצעת ישירות ב-AliExpress.
-        </p>
-      </section>
-
-      <footer className="mt-8 pb-6 text-center text-xs text-ink-muted">
-        © {new Date().getFullYear()} TrendFinder
-      </footer>
+      <SiteFooter />
     </main>
   );
 }
