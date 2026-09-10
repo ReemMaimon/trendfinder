@@ -1,18 +1,21 @@
 import crypto from "node:crypto";
 import { affiliateConfigProblems, affiliateCreds } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import { prisma } from "@/lib/db";
 import { AffiliateConfigError } from "@/lib/errors";
 import { SettingsService } from "@/services/settings/SettingsService";
+import { generatePromotionLinks } from "./aliexpressLinkApi";
 
 /**
  * Central place for ALL affiliate logic. Nothing else in the codebase should
  * know how a purchase URL is built.
  *
- *   TEST MODE       -> getPurchaseUrl() returns the plain AliExpress URL.
- *                      No affiliate credentials required.
- *   PRODUCTION MODE  -> getPurchaseUrl() returns an affiliate deep link.
- *                      If credentials are missing it THROWS (fail-safe) — the
- *                      caller must not publish a fabricated link.
+ *   TEST MODE       -> plain AliExpress URL. No credentials required.
+ *   PRODUCTION MODE  -> a commission-tracked affiliate link.
+ *                       Strategy `api` calls aliexpress.affiliate.link.generate
+ *                       and caches the result on the product row. If the API
+ *                       fails at click time we fall back to the plain URL and
+ *                       log it — the visitor is never sent to a dead link.
  */
 
 export interface AffiliateStatus {
@@ -26,11 +29,8 @@ export interface AffiliateStatus {
 function normalizeAeUrl(rawUrl: string): string {
   try {
     const u = new URL(rawUrl);
-    // strip tracking / session params, keep the canonical item path
     const itemMatch = u.pathname.match(/\/item\/(\d+)\.html/);
-    if (itemMatch) {
-      return `https://www.aliexpress.com/item/${itemMatch[1]}.html`;
-    }
+    if (itemMatch) return `https://www.aliexpress.com/item/${itemMatch[1]}.html`;
     u.search = "";
     u.hash = "";
     return u.toString();
@@ -40,17 +40,11 @@ function normalizeAeUrl(rawUrl: string): string {
 }
 
 function buildSClickLink(cleanUrl: string, pid: string): string {
-  // Non-signed tracking wrapper. Works with a Portals tracking id (PID).
   const target = encodeURIComponent(cleanUrl);
-  return `https://s.click.aliexpress.com/deep_link.htm?aff_short_key=${encodeURIComponent(
-    pid,
-  )}&dl_target_url=${target}`;
+  return `https://s.click.aliexpress.com/deep_link.htm?aff_short_key=${encodeURIComponent(pid)}&dl_target_url=${target}`;
 }
 
 function buildPortalsLink(cleanUrl: string): string {
-  // Signed api.aliexpress.com/affiliate.generate.promotion.links style call is
-  // an async API; for link-time generation we embed the required tracking
-  // params directly, signed with the app secret for auditability.
   const c = affiliateCreds();
   const params = new URLSearchParams({
     app_key: c.key,
@@ -58,19 +52,16 @@ function buildPortalsLink(cleanUrl: string): string {
     target_url: cleanUrl,
     ts: String(Date.now()),
   });
-  const sign = crypto
-    .createHmac("sha256", c.secret)
-    .update(params.toString())
-    .digest("hex")
-    .toUpperCase();
+  const sign = crypto.createHmac("sha256", c.secret).update(params.toString()).digest("hex").toUpperCase();
   params.set("sign", sign);
   return `https://s.click.aliexpress.com/e/_portals?${params.toString()}`;
 }
 
+const AFFILIATE_URL_TTL_MS = 30 * 24 * 60 * 60 * 1000; // regenerate monthly
+
 export const AffiliateService = {
   async isEnabled(): Promise<boolean> {
-    const mode = await SettingsService.getAppMode();
-    return mode === "PRODUCTION";
+    return (await SettingsService.getAppMode()) === "PRODUCTION";
   },
 
   async status(): Promise<AffiliateStatus> {
@@ -85,11 +76,6 @@ export const AffiliateService = {
     };
   },
 
-  /**
-   * Assert that PRODUCTION mode is safe to run in. Throws AffiliateConfigError
-   * if credentials are missing. Called by the generation pipeline before
-   * publishing and by the admin "switch to production" action.
-   */
   async assertProductionReady(): Promise<void> {
     const missing = affiliateConfigProblems();
     if (missing.length > 0) {
@@ -98,30 +84,96 @@ export const AffiliateService = {
     }
   },
 
-  generateAffiliateLink(rawUrl: string): string {
+  /** Synchronous link builders for the non-API strategies. */
+  buildStaticLink(rawUrl: string): string {
     const clean = normalizeAeUrl(rawUrl);
-    const missing = affiliateConfigProblems();
-    if (missing.length > 0) throw new AffiliateConfigError(missing);
     const c = affiliateCreds();
-    return c.strategy === "portals"
-      ? buildPortalsLink(clean)
-      : buildSClickLink(clean, c.id);
+    return c.strategy === "portals" ? buildPortalsLink(clean) : buildSClickLink(clean, c.id);
   },
 
   /**
-   * The URL the public "Buy on AliExpress" button should use.
-   *   - always returns a usable https URL in TEST mode
-   *   - returns an affiliate link in PRODUCTION mode
-   *   - throws in PRODUCTION mode if misconfigured (never returns a fake link)
+   * Resolve the outbound URL for a product's Buy button.
+   * TEST -> plain URL. PRODUCTION -> affiliate link (cached on the product).
+   * Never throws for the public path; on any failure it returns the plain URL.
    */
+  async resolveForProduct(product: {
+    id: string;
+    aeUrl: string;
+    affiliateUrl?: string | null;
+    affiliateUrlAt?: Date | null;
+  }): Promise<{ url: string; linkMode: "test" | "production" }> {
+    const mode = await SettingsService.getAppMode();
+    const clean = normalizeAeUrl(product.aeUrl);
+    if (mode === "TEST") return { url: clean, linkMode: "test" };
+
+    const missing = affiliateConfigProblems();
+    if (missing.length > 0) {
+      logger.error({ missing, productId: product.id }, "PRODUCTION buy click but affiliate misconfigured — using plain URL");
+      return { url: clean, linkMode: "test" };
+    }
+
+    const c = affiliateCreds();
+
+    // non-API strategies: cheap, synchronous, no caching needed
+    if (c.strategy !== "api") {
+      return { url: this.buildStaticLink(product.aeUrl), linkMode: "production" };
+    }
+
+    // API strategy: use cached link if fresh
+    const fresh =
+      product.affiliateUrl &&
+      product.affiliateUrlAt &&
+      Date.now() - new Date(product.affiliateUrlAt).getTime() < AFFILIATE_URL_TTL_MS;
+    if (fresh && product.affiliateUrl) {
+      return { url: product.affiliateUrl, linkMode: "production" };
+    }
+
+    // generate + cache
+    const res = await generatePromotionLinks([clean]);
+    const link = res.links.get(clean) ?? [...res.links.values()][0];
+    if (link) {
+      await prisma.product
+        .update({ where: { id: product.id }, data: { affiliateUrl: link, affiliateUrlAt: new Date() } })
+        .catch((err) => logger.warn({ err }, "failed to cache affiliate url"));
+      return { url: link, linkMode: "production" };
+    }
+
+    logger.warn({ productId: product.id, error: res.error }, "affiliate link generation failed — using plain URL");
+    return { url: clean, linkMode: "test" };
+  },
+
+  /** Pre-generate + cache affiliate links for many products (admin / pipeline). */
+  async pregenerate(products: { id: string; aeUrl: string }[]): Promise<{ ok: number; failed: number }> {
+    if (affiliateConfigProblems().length > 0 || affiliateCreds().strategy !== "api") {
+      return { ok: 0, failed: products.length };
+    }
+    const cleanMap = new Map(products.map((p) => [normalizeAeUrl(p.aeUrl), p.id]));
+    const res = await generatePromotionLinks([...cleanMap.keys()]);
+    let ok = 0;
+    for (const [clean, link] of res.links) {
+      const id = cleanMap.get(clean);
+      if (!id) continue;
+      await prisma.product
+        .update({ where: { id }, data: { affiliateUrl: link, affiliateUrlAt: new Date() } })
+        .then(() => ok++)
+        .catch(() => {});
+    }
+    return { ok, failed: products.length - ok };
+  },
+
+  /** Legacy: used only by tests / the mode-switch guard. */
   async getPurchaseUrl(rawUrl: string): Promise<{ url: string; linkMode: "test" | "production" }> {
     const mode = await SettingsService.getAppMode();
     const clean = normalizeAeUrl(rawUrl);
-    if (mode === "TEST") {
-      return { url: clean, linkMode: "test" };
-    }
+    if (mode === "TEST") return { url: clean, linkMode: "test" };
     await this.assertProductionReady();
-    return { url: this.generateAffiliateLink(clean), linkMode: "production" };
+    const c = affiliateCreds();
+    if (c.strategy === "api") {
+      const res = await generatePromotionLinks([clean]);
+      const link = res.links.get(clean) ?? [...res.links.values()][0];
+      return link ? { url: link, linkMode: "production" } : { url: clean, linkMode: "test" };
+    }
+    return { url: this.buildStaticLink(clean), linkMode: "production" };
   },
 
   normalizeAeUrl,

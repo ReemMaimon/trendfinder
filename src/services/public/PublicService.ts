@@ -175,10 +175,13 @@ export const PublicService = {
     return toPublic(fakeItem);
   },
 
-  /** Resolve the outbound purchase URL for the Buy button + record the click. */
+  /** Resolve the outbound purchase URL for the Buy button (see /api/go/[id]). */
   async purchaseUrl(productId: string): Promise<{ url: string; linkMode: "test" | "production" } | null> {
-    const p = await prisma.product.findUnique({ where: { id: productId }, select: { aeUrl: true } });
+    const p = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, aeUrl: true, affiliateUrl: true, affiliateUrlAt: true },
+    });
     if (!p) return null;
-    return AffiliateService.getPurchaseUrl(p.aeUrl);
+    return AffiliateService.resolveForProduct(p);
   },
 };

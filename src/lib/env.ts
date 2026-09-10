@@ -40,9 +40,15 @@ const rawSchema = z.object({
   ALIEXPRESS_AFFILIATE_ID: z.string().optional(),
   ALIEXPRESS_AFFILIATE_KEY: z.string().optional(),
   ALIEXPRESS_AFFILIATE_SECRET: z.string().optional(),
+  // api     = official aliexpress.affiliate.link.generate call (needs id+key+secret) [recommended]
+  // s.click = unsigned tracking wrapper (needs only id; weak attribution)
+  // portals = locally-signed param wrap (legacy)
   ALIEXPRESS_AFFILIATE_STRATEGY: z
-    .enum(["portals", "s.click"])
-    .default("s.click"),
+    .enum(["api", "portals", "s.click"])
+    .default("api"),
+  ALIEXPRESS_API_ENDPOINT: z
+    .string()
+    .default("https://api-sg.aliexpress.com/sync"),
 
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
@@ -85,9 +91,11 @@ export function affiliateCreds() {
     id: process.env.ALIEXPRESS_AFFILIATE_ID || "",
     key: process.env.ALIEXPRESS_AFFILIATE_KEY || "",
     secret: process.env.ALIEXPRESS_AFFILIATE_SECRET || "",
-    strategy: (process.env.ALIEXPRESS_AFFILIATE_STRATEGY || "s.click") as
+    strategy: (process.env.ALIEXPRESS_AFFILIATE_STRATEGY || "api") as
+      | "api"
       | "portals"
       | "s.click",
+    endpoint: process.env.ALIEXPRESS_API_ENDPOINT || "https://api-sg.aliexpress.com/sync",
   };
 }
 
@@ -99,7 +107,7 @@ export function affiliateConfigProblems(): string[] {
   const c = affiliateCreds();
   const missing: string[] = [];
   if (!c.id) missing.push("ALIEXPRESS_AFFILIATE_ID");
-  if (c.strategy === "portals") {
+  if (c.strategy === "api" || c.strategy === "portals") {
     if (!c.key) missing.push("ALIEXPRESS_AFFILIATE_KEY");
     if (!c.secret) missing.push("ALIEXPRESS_AFFILIATE_SECRET");
   }

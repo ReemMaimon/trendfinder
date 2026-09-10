@@ -101,6 +101,8 @@ model Product {
   aeTitle          String
   aeDescription    String?  @db.Text
   aeUrl            String              // canonical product URL (non-affiliate)
+  affiliateUrl     String?             // cached commission link (PRODUCTION only)
+  affiliateUrlAt   DateTime?
   aeProductId      String?             // numeric item id if extractable
   aeStoreName      String?
   aeImages         Json                // string[] of image URLs
