@@ -1,31 +1,29 @@
-import type { PublicProduct } from "@/services/public/PublicService";
-import { ScoreBar } from "./ScoreBar";
+import type { PublicProduct, SignalDisplay } from "@/services/public/PublicService";
 import { SignalRow } from "./SignalBadge";
+
+const PLATFORMS = ["tiktok", "instagram", "youtube", "googleTrends"] as const;
 
 export function TrendReport({ product }: { product: PublicProduct }) {
   const s = product.social;
+
+  // Only show platforms that actually have a signal — hide "לא ידוע" / UNKNOWN rows.
+  const rows = s
+    ? PLATFORMS.filter((p) => (s[p] as SignalDisplay).level !== "UNKNOWN")
+    : [];
+
   return (
     <section className="card p-4">
       <h2 className="mb-3 text-lg font-extrabold text-ink">🔥 למה זה טרנדי?</h2>
 
-      {s && (
+      {rows.length > 0 && (
         <div className="mb-4 rounded-xl bg-brand-50 p-3">
-          <SignalRow platform="tiktok" signal={s.tiktok} />
-          <SignalRow platform="instagram" signal={s.instagram} />
-          <SignalRow platform="youtube" signal={s.youtube} />
-          <SignalRow platform="googleTrends" signal={s.googleTrends} />
+          {rows.map((p) => (
+            <SignalRow key={p} platform={p} signal={s![p] as SignalDisplay} />
+          ))}
         </div>
       )}
 
-      <div className="space-y-3">
-        <ScoreBar label="פוטנציאל ויראלי" value={product.scores.viral} />
-        <ScoreBar label="פוטנציאל שותפים" value={product.scores.affiliate} />
-        <ScoreBar label="מומנטום טרנד" value={product.scores.momentum} />
-        <ScoreBar label="חדשנות" value={product.scores.novelty} />
-        <ScoreBar label="רוויה בשוק" value={product.scores.saturation} tone="red" />
-      </div>
-
-      <p className="mt-4 rounded-xl bg-ink/5 p-3 text-sm leading-relaxed text-ink-soft">
+      <p className="rounded-xl bg-ink/5 p-3 text-sm leading-relaxed text-ink-soft">
         {product.explanationHe}
       </p>
       {s?.reasoningHe && (
