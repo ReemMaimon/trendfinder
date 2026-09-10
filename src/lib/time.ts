@@ -44,6 +44,14 @@ export function previousDates(dateStr: string, n: number): string[] {
   return Array.from({ length: n }, (_, i) => addDays(dateStr, -(i + 1)));
 }
 
+/** The UTC instant of 00:00 on `dateStr` (YYYY-MM-DD) in the app timezone. */
+export function jerusalemDayStartUtc(dateStr: string, tz = env.TIMEZONE): Date {
+  const asUtc = new Date(`${dateStr}T00:00:00Z`);
+  const local = new Date(asUtc.toLocaleString("en-US", { timeZone: tz }));
+  const utc = new Date(asUtc.toLocaleString("en-US", { timeZone: "UTC" }));
+  return new Date(asUtc.getTime() - (local.getTime() - utc.getTime()));
+}
+
 /**
  * Milliseconds until the next 00:00 in the app timezone. Used by the scheduler
  * as a sanity value and by the admin dashboard countdown.

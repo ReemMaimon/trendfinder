@@ -11,7 +11,7 @@ const LINKS = [
   { href: "/admin/candidates", label: "מועמדים" },
   { href: "/admin/sources", label: "מקורות" },
   { href: "/admin/products", label: "מוצרים" },
-  { href: "/admin/analytics", label: "אנליטיקה" },
+  { href: "/admin/stats", label: "סטטיסטיקות" },
   { href: "/admin/settings", label: "הגדרות" },
 ];
 

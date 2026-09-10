@@ -14,13 +14,27 @@ export function TrackView({
   useEffect(() => {
     if (sent.current) return;
     sent.current = true;
-    const payload = JSON.stringify({ productId, type });
+    let utmSource: string | undefined;
     try {
-      if (navigator.sendBeacon) {
-        navigator.sendBeacon("/api/track", new Blob([payload], { type: "application/json" }));
-      } else {
-        fetch("/api/track", { method: "POST", body: payload, headers: { "content-type": "application/json" }, keepalive: true });
-      }
+      utmSource = new URLSearchParams(window.location.search).get("utm_source") || undefined;
+    } catch {
+      /* ignore */
+    }
+    const payload = JSON.stringify({
+      productId,
+      type,
+      referrer: document.referrer || undefined,
+      utmSource,
+    });
+    try {
+      // fetch (not sendBeacon) so the Set-Cookie for the session id is applied
+      fetch("/api/track", {
+        method: "POST",
+        body: payload,
+        headers: { "content-type": "application/json" },
+        keepalive: true,
+        credentials: "same-origin",
+      });
     } catch {
       /* ignore */
     }

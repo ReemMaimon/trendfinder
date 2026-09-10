@@ -306,12 +306,20 @@ model ProductView {
   productId String
   date      String   // YYYY-MM-DD Asia/Jerusalem
   kind      ViewKind
-  // coarse anonymised visitor hash (ip+ua+day salted) for de-dup / unique counts
+  // coarse anonymised visitor hash (ip+ua+day salted) — daily de-dup
   visitorHash String
+  // opaque first-party session cookie (rotating ~1y) — cross-day unique visitors
+  sessionId   String?
+  referrer    String?
+  source      String?  // direct|google|whatsapp|instagram|tiktok|facebook|internal|other
+  deviceType  String?  // mobile|tablet|desktop
   createdAt DateTime @default(now())
 
   @@index([productId, date])
   @@index([date])
+  @@index([createdAt])
+  @@index([source])
+  @@index([sessionId])
   @@map("product_views")
 }
 
@@ -326,12 +334,19 @@ model ProductClick {
   productId String
   date      String
   visitorHash String
+  sessionId   String?
+  referrer    String?
+  source      String?
+  deviceType  String?
   // "test" (plain url) or "production" (affiliate) — snapshot for auditing
   linkMode  String
   createdAt DateTime @default(now())
 
   @@index([productId, date])
   @@index([date])
+  @@index([createdAt])
+  @@index([source])
+  @@index([sessionId])
   @@map("product_clicks")
 }
 

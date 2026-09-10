@@ -3,7 +3,7 @@ import { publicRoute } from "@/lib/apiHelpers";
 import { prisma } from "@/lib/db";
 import { AffiliateService } from "@/services/affiliate/AffiliateService";
 import { AnalyticsService } from "@/services/analytics/AnalyticsService";
-import { visitorHash } from "@/lib/visitor";
+import { visitorHash, getOrCreateSessionId, deriveSource, deriveDevice } from "@/lib/visitor";
 import { clientIp, rateLimit } from "@/lib/rateLimit";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
@@ -41,10 +41,15 @@ export const GET = publicRoute(async (req: NextRequest, ctx: { params: { id: str
     target = { url: AffiliateService.normalizeAeUrl(product.aeUrl), linkMode: "test" };
   }
 
-  const vh = visitorHash(ip, req.headers.get("user-agent") ?? "");
-  await AnalyticsService.recordClick(id, target.linkMode, vh).catch((e) =>
-    logger.warn({ err: e }, "failed to record click"),
-  );
+  const ua = req.headers.get("user-agent") ?? "";
+  const referrer = req.headers.get("referer") || null;
+  await AnalyticsService.recordClick(id, target.linkMode, {
+    visitorHash: visitorHash(ip, ua),
+    sessionId: getOrCreateSessionId(),
+    referrer,
+    source: deriveSource(referrer, req.nextUrl.searchParams.get("utm_source")),
+    deviceType: deriveDevice(ua),
+  }).catch((e) => logger.warn({ err: e }, "failed to record click"));
 
   return NextResponse.redirect(target.url, 302);
 });

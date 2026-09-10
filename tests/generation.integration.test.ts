@@ -110,15 +110,25 @@ d("DailyGenerationService (mock AI, TEST mode)", () => {
     const set = await prisma.dailyProductSet.findUnique({ where: { date }, include: { items: true } });
     const pid = set!.items[0].productId;
 
-    await AnalyticsService.recordView(pid, "CARD", "visitor-a");
-    await AnalyticsService.recordView(pid, "CARD", "visitor-a"); // de-duped
-    await AnalyticsService.recordView(pid, "DETAIL", "visitor-b");
-    await AnalyticsService.recordClick(pid, "test", "visitor-b");
+    await AnalyticsService.recordView(pid, "CARD", { visitorHash: "visitor-a", sessionId: "sa", source: "whatsapp" });
+    await AnalyticsService.recordView(pid, "CARD", { visitorHash: "visitor-a", sessionId: "sa" }); // de-duped
+    await AnalyticsService.recordView(pid, "DETAIL", { visitorHash: "visitor-b", sessionId: "sb", source: "google" });
+    await AnalyticsService.recordClick(pid, "test", { visitorHash: "visitor-b", sessionId: "sb", source: "whatsapp" });
 
     const report = await AnalyticsService.dayReport(date);
     const row = report!.rows.find((r) => r.productId === pid)!;
     expect(row.views).toBe(2);
     expect(row.clicks).toBe(1);
     expect(row.ctr).toBe(50);
+
+    // range-based bundle uses the same real rows
+    const range = AnalyticsService.resolveRange("all");
+    const bundle = await AnalyticsService.bundle(range);
+    expect(bundle.overview.totalViews).toBeGreaterThanOrEqual(2);
+    expect(bundle.overview.buyClicks).toBeGreaterThanOrEqual(1);
+    expect(bundle.sources.some((s) => s.source === "whatsapp")).toBe(true);
+    const prod = bundle.products.find((p) => p.productId === pid)!;
+    expect(prod.views).toBe(2);
+    expect(prod.clicks).toBe(1);
   });
 });
