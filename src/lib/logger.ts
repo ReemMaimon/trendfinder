@@ -2,10 +2,12 @@ import pino from "pino";
 import { env } from "./env";
 
 /**
- * Structured logger. In development it pretty-prints; in production it emits
- * newline-delimited JSON that PM2 / Hostinger can collect to a log file.
+ * Structured logger. Production (`next start`) emits newline-delimited JSON that
+ * PM2 / Hostinger collect to a file. In development we pretty-print — but via an
+ * in-process transform stream, NOT pino's worker-thread transport (which Next's
+ * dev webpack fails to bundle, crashing the dev server).
  */
-export const logger = pino({
+const options: pino.LoggerOptions = {
   level: env.LOG_LEVEL,
   base: { app: "trendfinder" },
   redact: {
@@ -22,11 +24,20 @@ export const logger = pino({
     ],
     censor: "[redacted]",
   },
-  transport:
-    env.NODE_ENV === "development"
-      ? { target: "pino-pretty", options: { colorize: true, translateTime: "SYS:HH:MM:ss" } }
-      : undefined,
-});
+};
+
+let stream: NodeJS.WritableStream | undefined;
+if (env.NODE_ENV === "development") {
+  try {
+    // eslint-disable-next-line
+    const pretty = require("pino-pretty");
+    stream = pretty({ colorize: true, translateTime: "SYS:HH:MM:ss", ignore: "pid,hostname,app" });
+  } catch {
+    /* fall back to JSON */
+  }
+}
+
+export const logger = stream ? pino(options, stream) : pino(options);
 
 export function child(bindings: Record<string, unknown>) {
   return logger.child(bindings);

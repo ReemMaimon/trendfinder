@@ -20,6 +20,8 @@ export function WelcomeModal() {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    // never on the admin area
+    if (typeof window !== "undefined" && window.location.pathname.startsWith("/admin")) return;
     if (!REMEMBER_DISMISS) {
       setOpen(true);
       return;

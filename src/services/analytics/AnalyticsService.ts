@@ -242,8 +242,10 @@ export const AnalyticsService = {
         saturationScore: p?.saturationScore ?? 0,
         affiliatePotential: p?.affiliatePotentialScore ?? 0,
         createdAt: p?.createdAt ?? null,
-        // transparent internal ranking (real numbers are still shown separately)
-        performanceScore: Math.round(views * 0.3 + clicks * 3 + ctr * 2),
+        // transparent internal ranking (real numbers are still shown separately).
+        // CTR capped at 100 so a low-traffic outlier (e.g. 4 clicks / 2 views)
+        // doesn't dominate the score.
+        performanceScore: Math.round(views * 0.3 + clicks * 3 + Math.min(ctr, 100) * 2),
       };
     });
   },
@@ -289,9 +291,8 @@ export const AnalyticsService = {
         out.push({ bucket: `${String(h).padStart(2, "0")}:00`, ...v });
       }
     } else {
-      let d = r.fromDate;
-      const start = r.preset === "all" && rows.length ? [...map.keys()].sort()[0] : r.fromDate;
-      d = start;
+      let d = r.preset === "all" && map.size ? [...map.keys()].sort()[0] : r.fromDate;
+      if (daysBetween(d, r.toDate) > 120) d = addDays(r.toDate, -120);
       while (d <= r.toDate) {
         const v = map.get(d) ?? { count: 0, uniques: 0 };
         out.push({ bucket: d, ...v });
@@ -499,7 +500,10 @@ export const AnalyticsService = {
         });
       }
     } else {
-      let d = r.fromDate;
+      const keys = [...new Set([...vmap.keys(), ...cmap.keys()])].sort();
+      let d = r.preset === "all" && keys.length ? keys[0] : r.fromDate;
+      // cap the number of daily points so "all" stays reasonable
+      if (daysBetween(d, r.toDate) > 120) d = addDays(r.toDate, -120);
       while (d <= r.toDate) {
         combined.push({ bucket: d, views: vmap.get(d) ?? 0, clicks: cmap.get(d) ?? 0 });
         d = addDays(d, 1);
