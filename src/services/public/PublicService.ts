@@ -146,6 +146,10 @@ export const PublicService = {
     try {
       const rows = await loadRows(date);
       const products = await Promise.all(rows.map(toPublic));
+      // shown to visitors ordered by viral potential (highest first)
+      products.sort(
+        (a, b) => b.scores.viral - a.scores.viral || b.scores.overall - a.scores.overall,
+      );
       return { date, products };
     } catch (err) {
       const { logger } = await import("@/lib/logger");
