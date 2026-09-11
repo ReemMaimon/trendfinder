@@ -5,7 +5,7 @@ import { WelcomeModal } from "@/components/WelcomeModal";
 
 const siteName = "TrendFinder — המוצרים החמים של היום";
 const description =
-  "כל יום אנחנו מגלים טרנדים מתפרצים של מוצרים, חוקרים אותם ברשת עם בינה מלאכותית ומוצאים את המוצרים התואמים ב-AliExpress. 3 מוצרים נבחרים בכל בוקר.";
+  "כל יום אנחנו מגלים טרנדים מתפרצים של מוצרים, חוקרים אותם ברשת עם בינה מלאכותית ומוצאים את המוצרים התואמים ב-AliExpress. מוצרים נבחרים בכל בוקר.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(env.SITE_URL),

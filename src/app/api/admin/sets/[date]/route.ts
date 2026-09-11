@@ -24,13 +24,15 @@ export const GET = adminRoute(async (_req: Request, ctx: { params: { date: strin
   return json({ set });
 });
 
+// position is a soft-capped 1..10 (the real limit is settings.productsPerDay,
+// enforced by the generation pipeline / admin UI, not hardcoded here).
 const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("publish") }),
   z.object({ action: z.literal("unpublish") }),
-  z.object({ action: z.literal("reorder"), positions: z.array(z.object({ productId: z.string(), position: z.number().int().min(1).max(3) })).length(3) }),
-  z.object({ action: z.literal("replace"), position: z.number().int().min(1).max(3), newProductId: z.string() }),
-  z.object({ action: z.literal("remove"), position: z.number().int().min(1).max(3) }),
-  z.object({ action: z.literal("add"), productId: z.string(), position: z.number().int().min(1).max(3) }),
+  z.object({ action: z.literal("reorder"), positions: z.array(z.object({ productId: z.string(), position: z.number().int().min(1).max(10) })).min(1).max(10) }),
+  z.object({ action: z.literal("replace"), position: z.number().int().min(1).max(10), newProductId: z.string() }),
+  z.object({ action: z.literal("remove"), position: z.number().int().min(1).max(10) }),
+  z.object({ action: z.literal("add"), productId: z.string(), position: z.number().int().min(1).max(10) }),
 ]);
 
 /**

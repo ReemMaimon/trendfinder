@@ -83,7 +83,7 @@ export function WelcomeModal() {
 
         <h2 className="mt-4 text-lg font-extrabold">רוצים לדעת ראשונים?</h2>
         <p className="mt-1 text-sm leading-relaxed text-white/70">
-          הצטרפו לערוץ הוואטסאפ שלנו וקבלו כל יום התראה על 3 המוצרים הכי חמים —
+          הצטרפו לערוץ הוואטסאפ שלנו וקבלו כל יום התראה על המוצרים הכי חמים —
           לפני שכולם מדברים עליהם.
         </p>
 

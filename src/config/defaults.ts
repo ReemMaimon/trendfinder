@@ -32,6 +32,8 @@ export const settingsSchema = z.object({
   promptVersion: z.string(),
   researchInstructions: z.string(),
   aliexpressSearchTemplates: z.array(z.string()).min(1),
+  // How many products are published per day (public homepage + daily set size).
+  productsPerDay: z.number().int().min(1).max(10),
   maxCandidates: z.number().int().min(3).max(60),
   minOverallScore: z.number().int().min(0).max(100),
   maxSaturationScore: z.number().int().min(0).max(100),
@@ -68,6 +70,7 @@ export const DEFAULT_SETTINGS: Settings = {
     "{keyword} rechargeable",
     "{trendKeyword}",
   ],
+  productsPerDay: 3,
   maxCandidates: 20,
   minOverallScore: 55,
   maxSaturationScore: 80,

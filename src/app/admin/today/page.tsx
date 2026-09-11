@@ -94,11 +94,11 @@ export default function AdminTodayPage() {
               </li>
             ))}
           </ol>
-          {set.items.length < 3 && (
-            <p className="mt-3 text-sm text-amber-700">
-              בסט יש {set.items.length} מוצרים בלבד. השתמש ב&quot;החלפה&quot; או בהפקה מחדש כדי להשלים ל-3.
-            </p>
-          )}
+          <p className="mt-3 text-sm text-amber-700">
+            בסט יש {set.items.length} מוצרים. מספר המוצרים היעד מוגדר ב
+            <a href="/admin/settings" className="underline">הגדרות</a>
+            {" "}(&quot;מספר מוצרים ביום&quot;). ניתן להשלים עם &quot;החלפה&quot; או הפקה מחדש.
+          </p>
         </Card>
       )}
 

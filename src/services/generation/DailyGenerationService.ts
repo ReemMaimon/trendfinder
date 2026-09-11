@@ -257,8 +257,9 @@ async function runPipeline(
 
       let attempt = 0;
       let candidateOrder = 0;
+      const targetCount = settings.productsPerDay;
 
-      while (acceptedProductIds.length < 3 && attempt < settings.maxCandidates) {
+      while (acceptedProductIds.length < targetCount && attempt < settings.maxCandidates) {
         attempt++;
         candidateOrder++;
         emit("research", `attempt ${attempt}/${settings.maxCandidates}`);
@@ -273,7 +274,7 @@ async function runPipeline(
           maxPriceIls,
           maxPriceUsd,
           order: candidateOrder,
-          slotLabel: `${acceptedProductIds.length + 1}/3`,
+          slotLabel: `${acceptedProductIds.length + 1}/${targetCount}`,
           emit,
           searchedTopics,
           errorLog,
@@ -286,9 +287,9 @@ async function runPipeline(
 
       // ---- fallback ------------------------------------------------------
       let fallbackCount = 0;
-      if (acceptedProductIds.length < 3) {
+      if (acceptedProductIds.length < targetCount) {
         emit("fallback", `only ${acceptedProductIds.length} new products — attempting fallback`);
-        const needed = 3 - acceptedProductIds.length;
+        const needed = targetCount - acceptedProductIds.length;
         const fallbackProducts = await pickFallbackProducts(
           targetDate,
           settings.fallbackLookbackDays,
@@ -381,7 +382,7 @@ async function runPipeline(
       }
 
       const status: GenerationResult["status"] =
-        newCount >= 3 ? "SUCCESS" : total >= 1 ? "PARTIAL" : "FAILED";
+        newCount >= targetCount ? "SUCCESS" : total >= 1 ? "PARTIAL" : "FAILED";
 
       await prisma.generationRun.update({
         where: { id: run.id },
@@ -718,8 +719,8 @@ async function runSlotRegeneration(
   trigger: RunTrigger,
   emit: (step: string, detail?: string) => void,
 ): Promise<{ ok: boolean; runId: string; productId?: string; message: string }> {
-  if (position < 1 || position > 3) {
-    return { ok: false, runId: "", message: "position must be 1, 2 or 3" };
+  if (position < 1 || position > 10) {
+    return { ok: false, runId: "", message: "position must be between 1 and 10" };
   }
 
   const set = await prisma.dailyProductSet.findUnique({
@@ -727,6 +728,13 @@ async function runSlotRegeneration(
     include: { items: { include: { product: true } } },
   });
   if (!set) return { ok: false, runId: "", message: `no daily set for ${targetDate}` };
+  if (position > set.items.length + 1) {
+    return {
+      ok: false,
+      runId: "",
+      message: `the set only has ${set.items.length} product(s); position ${position} would leave a gap`,
+    };
+  }
 
   const keptItems = set.items.filter((i) => i.position !== position);
   const keptDiversity: DiversityItem[] = keptItems.map((i) => ({
